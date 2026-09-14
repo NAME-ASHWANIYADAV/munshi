@@ -40,6 +40,9 @@ class ActionOut(ApiModel):
     summary_hi: str = ""
     params: dict[str, Any] = Field(default_factory=dict)
     target_count: int = 0
+    #: The finding this action answers, when it came from one. The screen uses it to show the
+    #: chain — a proposal that cannot point back at why it exists is just a demand.
+    insight_id: str | None = None
     estimated_impact: Money
     estimated_cost: Money
     #: Expected return less what it costs to send. Negative means do not do it.
@@ -63,6 +66,7 @@ class ActionOut(ApiModel):
             summary_hi=action.summary_hi,
             params=action.params or {},
             target_count=action.target_count,
+            insight_id=action.insight_id,
             estimated_impact=money(action.estimated_impact_paise),
             estimated_cost=money(action.estimated_cost_paise),
             net_expected=money(action.estimated_impact_paise - action.estimated_cost_paise),
