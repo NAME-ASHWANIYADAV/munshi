@@ -28,6 +28,7 @@ from munshiji.config import get_settings
 from munshiji.db.base import init_db, reset_db, session_scope
 from munshiji.logging import configure_logging
 from munshiji.money import fmt_inr
+from munshiji.repositories.core import first_merchant
 
 app = typer.Typer(
     add_completion=False,
@@ -75,6 +76,9 @@ def seed(
     reset: Annotated[bool, typer.Option(help="Drop and recreate every table first.")] = False,
     days: Annotated[int, typer.Option(help="Days of history to generate.")] = 180,
     seed_value: Annotated[int, typer.Option("--seed", help="RNG seed (determinism).")] = 0,
+    warm: Annotated[
+        bool, typer.Option(help="Also compute the findings and build the memory graph.")
+    ] = True,
 ) -> None:
     """Generate a realistic shop history for the demo merchant."""
     configure_logging()
@@ -89,8 +93,51 @@ def seed(
     with console.status("Generating shop history…"), session_scope() as session:
         result = generate(session, seed=seed_value or settings.seed, days=days)
 
+    if warm:
+        _warm_up()
+
     console.print(Panel.fit(str(result), title="Seeded", border_style="green"))
     console.print("Next: [bold]munshiji insights[/bold] or [bold]munshiji demo[/bold]")
+
+
+def _warm_up() -> None:
+    """Compute the findings and build the memory graph, so the shop is ready to be looked at.
+
+    Generating transactions is only half of seeding. The insight engines run on demand and the
+    memory graph is built by ingestion, so until something asks, ``GET /api/insights`` answers
+    with an empty list and the knowledge graph has no nodes — a *successful* response carrying
+    nothing, which a caller cannot tell from a shop with nothing to say.
+
+    That is fine locally, where the first question warms everything. It is not fine on a fresh
+    container: the screen loads, three panels are empty, and the product looks broken on the one
+    view a stranger forms of it.
+    """
+    with console.status("Working out what needs attention…"), session_scope() as session:
+        merchant = first_merchant(session)
+        if merchant is None:
+            return
+        merchant_id = merchant.id
+        try:
+            from munshiji.insights.registry import refresh
+
+            refresh(session, merchant_id, as_of=now_ist())
+        except Exception as exc:  # pragma: no cover - a broken engine must not fail the seed
+            console.print(f"[yellow]insight refresh skipped:[/yellow] {exc}")
+        session.commit()
+
+    async def ingest() -> None:
+        from munshiji.memory.ingest import ingest_all
+        from munshiji.providers.factory import build_providers, resolve
+
+        bundle = await resolve(build_providers())
+        with session_scope() as session:
+            await bundle.memory.ingest(merchant_id, ingest_all(session, merchant_id))
+
+    with console.status("Building the memory graph…"):
+        try:
+            asyncio.run(ingest())
+        except Exception as exc:  # pragma: no cover - memory is not worth failing a seed over
+            console.print(f"[yellow]memory ingest skipped:[/yellow] {exc}")
 
 
 # ── health ──────────────────────────────────────────────────────────────────
