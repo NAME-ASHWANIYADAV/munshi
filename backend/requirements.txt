@@ -1,0 +1,15 @@
+# MunshiJi — core runtime dependencies (offline-capable; no vendor SDK required)
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+pydantic==2.10.4
+pydantic-settings==2.7.0
+SQLAlchemy==2.0.36
+httpx==0.28.1
+typer==0.15.1
+rich==13.9.4
+python-multipart==0.0.20
+
+# dev / test
+pytest==8.3.4
+pytest-asyncio==0.25.0
+ruff==0.8.4

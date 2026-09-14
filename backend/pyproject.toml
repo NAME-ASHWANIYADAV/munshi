@@ -1,0 +1,55 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "munshiji"
+version = "1.0.0"
+description = "MunshiJi — the AI munshi for Indian merchants. Paytm Build for India AI Hackathon, Delhi 2026."
+requires-python = ">=3.12"
+readme = "../README.md"
+authors = [{ name = "Team Neural Wave" }]
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.34",
+    "pydantic>=2.10",
+    "pydantic-settings>=2.7",
+    "SQLAlchemy>=2.0.36",
+    "httpx>=0.28",
+    "typer>=0.15",
+    "rich>=13.9",
+    "python-multipart>=0.0.20",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.3", "pytest-asyncio>=0.25", "ruff>=0.8"]
+live = ["cognee>=0.1.40"]
+
+[project.scripts]
+munshiji = "munshiji.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["munshiji*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+# B008    FastAPI's Depends()/File() defaults are the framework's idiom.
+# RUF001-3 Devanagari and typographic punctuation are content here, not homoglyph mistakes.
+# UP017   We import our own `UTC` from munshiji.clock; the rewrite collides with that name.
+ignore = ["B008", "RUF001", "RUF002", "RUF003", "UP017"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["munshiji"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+filterwarnings = ["ignore::DeprecationWarning"]
+addopts = "-q --tb=short"

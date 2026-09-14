@@ -1,0 +1,52 @@
+# MunshiJi — optional local stack.
+#
+# The product runs fine without any of this (offline providers). Bring this up when you want the
+# real n8n orchestration leg live: `docker compose up -d n8n`, open http://localhost:5678, import
+# the workflows from ./workflows, then set N8N_WEBHOOK_TOKEN in .env to the token you configured.
+
+services:
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:latest
+    container_name: munshiji-n8n
+    restart: unless-stopped
+    ports:
+      - "5678:5678"
+    environment:
+      # Local development only — do not reuse this posture anywhere public.
+      - N8N_HOST=localhost
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=http
+      - WEBHOOK_URL=http://localhost:5678/
+      - GENERIC_TIMEZONE=Asia/Kolkata
+      - TZ=Asia/Kolkata
+      - N8N_DIAGNOSTICS_ENABLED=false
+      - N8N_COMMUNITY_PACKAGES_ENABLED=true
+      # Lets you install the Cognee community node from the n8n UI:
+      #   Settings -> Community Nodes -> Install -> n8n-nodes-cognee
+      - N8N_REINSTALL_MISSING_PACKAGES=true
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - ./workflows:/workflows:ro
+
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: munshiji-api
+    restart: unless-stopped
+    profiles: ["full"]        # `docker compose --profile full up` — not needed for the n8n-only case
+    ports:
+      - "8000:8000"
+    environment:
+      - MUNSHIJI_DB_URL=sqlite:///data/munshiji.db
+      - MUNSHIJI_PROVIDER_MODE=auto
+      - N8N_BASE_URL=http://n8n:5678
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      - n8n
+
+volumes:
+  n8n_data:

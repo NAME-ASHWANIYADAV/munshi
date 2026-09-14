@@ -1,0 +1,6 @@
+# Optional: only needed to run the LIVE (vendor-backed) providers.
+# The product is fully functional without these — see SPEC.md §2.1.
+-r requirements.txt
+
+# Cognee graph memory (live MemoryProvider). Heavy transitive tree; install only when you have a key.
+cognee==0.1.44

@@ -1,0 +1,164 @@
+{
+  "name": "MunshiJi — Memory Sync (Cognee)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 6
+            }
+          ]
+        }
+      },
+      "id": "c1000000-0000-4000-8000-000000000001",
+      "name": "Every 6 hours",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [-400, 100]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "munshiji-memory-sync",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "c1000000-0000-4000-8000-000000000002",
+      "name": "On demand",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [-400, 280],
+      "webhookId": "c1000000-0000-4000-8000-000000000002"
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.MUNSHIJI_API_URL }}/api/actions/default",
+        "options": {
+          "response": { "response": { "responseFormat": "json" } }
+        }
+      },
+      "id": "c1000000-0000-4000-8000-000000000003",
+      "name": "Fetch actions",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-160, 100]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.MUNSHIJI_API_URL }}/api/insights/default",
+        "options": {
+          "response": { "response": { "responseFormat": "json" } }
+        }
+      },
+      "id": "c1000000-0000-4000-8000-000000000004",
+      "name": "Fetch insights",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-160, 280]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Flatten what the shop did into one document per fact, written so Cognee's extraction can\n// rebuild the relationships: every sentence names the actors (action, customers, amounts, dates)\n// rather than pointing at ids. Graph quality is decided here, not at query time.\nconst actions = $('Fetch actions').first()?.json?.actions ?? [];\nconst insights = $('Fetch insights').first()?.json?.insights ?? [];\n\nconst docs = [];\n\nfor (const action of actions) {\n  if (action.status !== 'executed') continue;\n  const outcomes = (action.outcomes ?? [])\n    .map((o) => `${o.metric} = ${o.value?.display ?? o.value_num ?? ''}`.trim())\n    .filter(Boolean)\n    .join('; ');\n  docs.push({\n    id: action.id,\n    kind: 'action',\n    text: [\n      `Action ${action.id} (${action.tool_name}) was approved and executed on ${action.executed_at}.`,\n      action.summary_en,\n      `It reached ${action.target_count} customers.`,\n      outcomes ? `Measured outcome: ${outcomes}.` : 'No outcome measured yet.',\n    ].filter(Boolean).join(' '),\n  });\n}\n\nfor (const insight of insights) {\n  docs.push({\n    id: insight.id,\n    kind: 'insight',\n    text: `Finding (${insight.kind}, ${insight.severity}): ${insight.title_en}. ${insight.body_en} Estimated impact ${insight.impact?.display ?? ''}.`,\n  });\n}\n\nif (docs.length === 0) {\n  return [{ json: { skip: true, reason: 'nothing new to remember' } }];\n}\n\nreturn docs.map((doc) => ({ json: doc }));"
+      },
+      "id": "c1000000-0000-4000-8000-000000000005",
+      "name": "Build documents",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [100, 190]
+    },
+    {
+      "parameters": {
+        "operation": "add",
+        "datasetName": "=munshiji_{{ $env.MUNSHIJI_MERCHANT_ID || 'default' }}",
+        "text": "={{ $json.text }}"
+      },
+      "id": "c1000000-0000-4000-8000-000000000006",
+      "name": "Cognee: Add Data",
+      "type": "n8n-nodes-cognee.cognee",
+      "typeVersion": 1,
+      "position": [340, 190],
+      "notes": "Community node — install from Settings → Community Nodes → n8n-nodes-cognee, then set Cognee API credentials. Verify the operation/parameter names against the installed version; they are stable but the node is young."
+    },
+    {
+      "parameters": {
+        "operation": "cognify",
+        "datasetName": "=munshiji_{{ $env.MUNSHIJI_MERCHANT_ID || 'default' }}"
+      },
+      "id": "c1000000-0000-4000-8000-000000000007",
+      "name": "Cognee: Cognify",
+      "type": "n8n-nodes-cognee.cognee",
+      "typeVersion": 1,
+      "position": [580, 190],
+      "executeOnce": true,
+      "notes": "Builds the knowledge graph: entities, relationships, chunks and embeddings. Runs once per sync, not per document."
+    },
+    {
+      "parameters": {
+        "operation": "search",
+        "datasetName": "=munshiji_{{ $env.MUNSHIJI_MERCHANT_ID || 'default' }}",
+        "query": "Which win-back offers were sent, and how much revenue did they recover?"
+      },
+      "id": "c1000000-0000-4000-8000-000000000008",
+      "name": "Cognee: Search (verify)",
+      "type": "n8n-nodes-cognee.cognee",
+      "typeVersion": 1,
+      "position": [820, 190],
+      "executeOnce": true,
+      "notes": "A read-back assertion, not decoration: if this returns nothing, the graph did not build and the next conversation would silently lose its memory."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Fail loudly on a silent ingest. A memory layer that quietly stops remembering is worse than\n// one that is obviously down.\nconst hits = $input.all();\nconst empty = hits.length === 0 || hits.every((h) => !JSON.stringify(h.json ?? {}).trim() || JSON.stringify(h.json) === '{}');\n\nif (empty) {\n  throw new Error('Cognee returned nothing after cognify — the graph did not build');\n}\n\nreturn [{ json: { ok: true, synced_at: new Date().toISOString(), sample: hits[0].json } }];"
+      },
+      "id": "c1000000-0000-4000-8000-000000000009",
+      "name": "Assert graph built",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1060, 190]
+    }
+  ],
+  "connections": {
+    "Every 6 hours": {
+      "main": [
+        [
+          { "node": "Fetch actions", "type": "main", "index": 0 },
+          { "node": "Fetch insights", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "On demand": {
+      "main": [
+        [
+          { "node": "Fetch actions", "type": "main", "index": 0 },
+          { "node": "Fetch insights", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Fetch actions": {
+      "main": [[{ "node": "Build documents", "type": "main", "index": 0 }]]
+    },
+    "Fetch insights": {
+      "main": [[{ "node": "Build documents", "type": "main", "index": 0 }]]
+    },
+    "Build documents": {
+      "main": [[{ "node": "Cognee: Add Data", "type": "main", "index": 0 }]]
+    },
+    "Cognee: Add Data": {
+      "main": [[{ "node": "Cognee: Cognify", "type": "main", "index": 0 }]]
+    },
+    "Cognee: Cognify": {
+      "main": [[{ "node": "Cognee: Search (verify)", "type": "main", "index": 0 }]]
+    },
+    "Cognee: Search (verify)": {
+      "main": [[{ "node": "Assert graph built", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Kolkata"
+  },
+  "pinData": {},
+  "tags": [{ "name": "munshiji" }]
+}
