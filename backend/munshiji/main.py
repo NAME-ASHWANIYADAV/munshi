@@ -7,6 +7,7 @@ their offline equivalents (SPEC.md §2.1).
 
 from __future__ import annotations
 
+import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -81,13 +82,22 @@ def create_app() -> FastAPI:
         redoc_url=None,
     )
 
+    # The Vite dev server, plus whatever a deployment adds. MUNSHIJI_CORS_ORIGINS takes a
+    # comma-separated list so a hosted companion screen can reach a hosted API without a rebuild;
+    # a single "*" is accepted for a throwaway demo deployment, which is safe here only because
+    # credentials are never sent and the API holds one seeded demo shop.
+    extra_origins = [
+        origin.strip()
+        for origin in os.getenv("MUNSHIJI_CORS_ORIGINS", "").split(",")
+        if origin.strip()
+    ]
     app.add_middleware(
         CORSMiddleware,
-        # Local development only: the companion screen runs on Vite's dev server.
         allow_origins=[
             "http://localhost:5173",
             "http://127.0.0.1:5173",
             "http://localhost:4173",
+            *extra_origins,
         ],
         allow_credentials=False,
         allow_methods=["*"],
