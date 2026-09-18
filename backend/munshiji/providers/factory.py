@@ -132,7 +132,10 @@ def build_providers(settings: Settings | None = None) -> ProviderBundle:
         try:
             from munshiji.providers.actions_n8n import N8nActions
 
-            actions = N8nActions(settings)
+            # Keyword on purpose: the first positional is the CLIENT. Passing settings there
+            # was the same disease the Cognee line had — the probe died on Settings.ping and
+            # silently benched the live path the first time a real token existed.
+            actions = N8nActions(settings=settings)
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning("n8n actions unavailable, staying local: %s", exc)
 
