@@ -47,13 +47,19 @@ class SarvamLLM:
         tools: list[ToolSpec] | None = None,
         *,
         temperature: float = 0.3,
-        max_tokens: int = 800,
+        max_tokens: int = 2048,
         language: str = "hi-IN",
     ) -> LLMResponse:
         """Produce the next assistant message, optionally requesting tool calls.
 
         ``language`` is not a wire parameter — Sarvam's model follows the system prompt — so it
         is recorded on the response for the UI rather than sent.
+
+        ``sarvam-105b`` thinks before it speaks, and the thinking bills against ``max_tokens``:
+        with the default effort a two-line question can spend the entire budget inside
+        ``reasoning_content`` and return ``content: null`` — a silent turn. Low effort plus a
+        roomy budget keeps the answer inside the window; the one retry below covers the model
+        occasionally overthinking anyway.
         """
         started = time.perf_counter()
         parsed = await chat_completion(
@@ -63,7 +69,22 @@ class SarvamLLM:
             model=self.model,
             temperature=temperature,
             max_tokens=max_tokens,
+            reasoning_effort="low",
         )
+        if not parsed.text and not parsed.tool_calls:
+            _log.warning(
+                "sarvam returned neither text nor tool calls (finish=%s); retrying with double budget",
+                parsed.finish_reason,
+            )
+            parsed = await chat_completion(
+                self._client,
+                messages,
+                tools,
+                model=self.model,
+                temperature=temperature,
+                max_tokens=max_tokens * 2,
+                reasoning_effort="low",
+            )
         latency_ms = int((time.perf_counter() - started) * 1000)
         return LLMResponse(
             text=parsed.text,

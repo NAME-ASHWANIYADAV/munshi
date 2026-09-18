@@ -52,8 +52,16 @@ def build_chat_payload(
     temperature: float = 0.3,
     max_tokens: int = 800,
     tool_choice: str = "auto",
+    reasoning_effort: str | None = None,
 ) -> dict[str, Any]:
-    """Serialise a turn into the OpenAI-compatible request body Sarvam accepts."""
+    """Serialise a turn into the OpenAI-compatible request body Sarvam accepts.
+
+    ``sarvam-105b`` is a reasoning model: it thinks in ``reasoning_content`` before it speaks in
+    ``content``, and the thinking spends the same ``max_tokens`` budget. Left at its default
+    effort the model can burn the whole budget mid-thought (``finish_reason: "length"``,
+    ``content: null``) and the merchant hears nothing — so callers pass ``reasoning_effort``
+    to keep the thinking short enough that the answer actually arrives.
+    """
     serialised = [_with_string_arguments(message.as_openai_dict()) for message in messages]
     payload: dict[str, Any] = {
         "model": model,
@@ -61,6 +69,8 @@ def build_chat_payload(
         "temperature": temperature,
         "max_tokens": max_tokens,
     }
+    if reasoning_effort:
+        payload["reasoning_effort"] = reasoning_effort
     if tools:
         payload["tools"] = [tool.as_openai_dict() for tool in tools]
         payload["tool_choice"] = tool_choice
@@ -91,6 +101,7 @@ async def chat_completion(
     temperature: float = 0.3,
     max_tokens: int = 800,
     tool_choice: str = "auto",
+    reasoning_effort: str | None = None,
 ) -> ParsedCompletion:
     """Call ``/v1/chat/completions`` and parse the reply into a :class:`ParsedCompletion`."""
     body = build_chat_payload(
@@ -100,6 +111,7 @@ async def chat_completion(
         temperature=temperature,
         max_tokens=max_tokens,
         tool_choice=tool_choice,
+        reasoning_effort=reasoning_effort,
     )
     payload = await client.request_json("POST", SARVAM_CHAT_PATH, json=body)
     return parse_chat_response(payload, fallback_model=model)
