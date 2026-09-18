@@ -234,12 +234,22 @@ class CogneeMemory:
             "Answer in one or two short sentences, in the same language as the question. "
             "Plain text only: no markdown, no tables, no bullet lists, no internal ids."
         )
-        results = await self._client.search(
-            styled,
-            dataset_name=dataset_name_for(merchant_id),
-            search_type=SEARCH_TYPE_GRAPH_COMPLETION,
-            top_k=max(limit, 1),
-        )
+        try:
+            results = await self._client.search(
+                styled,
+                dataset_name=dataset_name_for(merchant_id),
+                search_type=SEARCH_TYPE_GRAPH_COMPLETION,
+                top_k=max(limit, 1),
+            )
+        except ProviderUnavailableError as exc:
+            # A slow or absent graph must never cost the merchant the conversation. The local
+            # mirror holds the same facts; serve those and SAY SO — the context's provider
+            # field flips to "local", so nothing upstream can claim a live answer it did not
+            # get. The dual-provider promise, applied per-call rather than only at boot.
+            logger.warning("cognee search failed (%s); serving the local mirror", exc.message)
+            return await self._fallback.search(
+                merchant_id, query, limit=limit, hops=hops, kinds=kinds
+            )
         allowed = {MemoryKind(kind) for kind in kinds} if kinds else None
         hits: list[MemoryHit] = []
         for position, result in enumerate(results):
