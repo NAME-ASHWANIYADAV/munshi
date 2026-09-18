@@ -53,6 +53,8 @@ class Settings(BaseSettings):
     cognee_base_url: str = Field(
         default="https://platform.cognee.ai", validation_alias="COGNEE_BASE_URL"
     )
+    #: The managed platform scopes keys to a tenant and reads it from an X-Tenant-Id header.
+    cognee_tenant_id: str = Field(default="", validation_alias="COGNEE_TENANT_ID")
 
     # ── n8n (action orchestration) ──────────────────────────────────────────
     n8n_base_url: str = Field(default="http://localhost:5678", validation_alias="N8N_BASE_URL")

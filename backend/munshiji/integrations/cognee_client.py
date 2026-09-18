@@ -140,6 +140,7 @@ class CogneeClient:
         *,
         api_key: str | None = None,
         base_url: str | None = None,
+        tenant_id: str | None = None,
         timeout: float | None = None,
         client: httpx.AsyncClient | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
@@ -147,6 +148,9 @@ class CogneeClient:
         """Pass ``transport`` (e.g. ``httpx.MockTransport``) or ``client`` to test offline."""
         settings = get_settings()
         self.api_key = (api_key if api_key is not None else settings.cognee_api_key).strip()
+        self.tenant_id = (
+            tenant_id if tenant_id is not None else getattr(settings, "cognee_tenant_id", "")
+        ).strip()
         self.base_url = (base_url or settings.cognee_base_url).rstrip("/")
         self.timeout = float(timeout or settings.http_timeout_seconds)
 
@@ -159,17 +163,24 @@ class CogneeClient:
                 timeout=httpx.Timeout(self.timeout, connect=min(_CONNECT_TIMEOUT, self.timeout)),
                 headers=self._headers(),
                 transport=transport,
+                # The managed platform 307-redirects bare collection paths to their
+                # trailing-slash form; not following turned /datasets into a dead end.
+                follow_redirects=True,
             )
             self._owns_client = True
 
     def _headers(self) -> dict[str, str]:
         headers = {"Accept": "application/json"}
         if self.api_key:
-            # The OSS server reads a Bearer token; the managed platform has been seen reading
-            # X-Api-Key instead. Sending both costs nothing and whichever one the deployment
-            # understands wins — the other is ignored.
-            headers["Authorization"] = f"Bearer {self.api_key}"
+            # Two auth dialects. The managed tenant documents X-Api-Key + X-Tenant-Id and
+            # answers 401 "Invalid header" if an Authorization header rides along — it tries to
+            # parse the Bearer token as its own JWT and fails the REQUEST, not just the header.
+            # The OSS server wants the Bearer. A configured tenant id says which world this is.
             headers["X-Api-Key"] = self.api_key
+            if self.tenant_id:
+                headers["X-Tenant-Id"] = self.tenant_id
+            else:
+                headers["Authorization"] = f"Bearer {self.api_key}"
         return headers
 
     async def aclose(self) -> None:
@@ -260,38 +271,22 @@ class CogneeClient:
         )
 
         if not response.is_success:
+            # The managed platform's documented JSON shape (AddPayloadDTO): textData is an
+            # ARRAY of plain-text documents, one call for the whole batch. Last in the chain,
+            # so a failure here raises and names the real problem instead of a masked 4xx.
             logger.debug(
-                "cognee /add rejected multipart (%s); retrying as JSON", response.status_code
-            )
-            response = await self._request(
-                "POST",
-                ADD_PATH,
-                json={
-                    ADD_FILE_FIELD: [document.as_text() for document in documents],
-                    ADD_DATASET_FIELD: dataset_name,
-                    "dataset_name": dataset_name,
-                },
-                tolerate=(400, 404, 415, 422),
-            )
-
-        if not response.is_success:
-            # Third shape: the managed platform's per-document add_text. Last in the chain, so
-            # a failure here raises and names the real problem instead of a masked earlier 4xx.
-            logger.debug(
-                "cognee /add rejected JSON (%s); retrying per-document via %s",
+                "cognee /add rejected multipart (%s); retrying via %s",
                 response.status_code,
                 ADD_TEXT_PATH,
             )
-            for document in documents:
-                response = await self._request(
-                    "POST",
-                    ADD_TEXT_PATH,
-                    json={
-                        "text": document.as_text(),
-                        ADD_DATASET_FIELD: dataset_name,
-                        "dataset_name": dataset_name,
-                    },
-                )
+            response = await self._request(
+                "POST",
+                ADD_TEXT_PATH,
+                json={
+                    "textData": [document.as_text() for document in documents],
+                    ADD_DATASET_FIELD: dataset_name,
+                },
+            )
 
         payload = self._payload(response)
         return CogneeAddResult(
@@ -478,7 +473,29 @@ def parse_search_results(payload: Any, *, limit: int = 10) -> list[CogneeSearchR
     accepted; anything unrecognised yields an empty list rather than an exception.
     """
     results: list[CogneeSearchResult] = []
-    for item in _as_items(payload):
+    queue = list(_as_items(payload))
+    flattened: list[Any] = []
+    while queue:
+        item = queue.pop(0)
+        # The managed tenant answers as [{dataset_id, dataset_name, search_result: [...]}] —
+        # a per-dataset wrapper whose real results live one level down. Unwrap it here so the
+        # loop below only ever sees actual result items.
+        if isinstance(item, dict):
+            inner = None
+            for key in _LIST_KEYS:
+                candidate = item.get(key)
+                if isinstance(candidate, list):
+                    inner = candidate
+                    break
+                if isinstance(candidate, str) and candidate.strip():
+                    inner = [candidate]
+                    break
+            if inner is not None and ("dataset_id" in item or "dataset_name" in item):
+                queue.extend(inner)
+                continue
+        flattened.append(item)
+
+    for item in flattened:
         if isinstance(item, str):
             text = item
             score, name, raw = 0.0, "", item

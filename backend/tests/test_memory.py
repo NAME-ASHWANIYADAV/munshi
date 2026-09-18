@@ -902,6 +902,7 @@ def mock_client(handler, *, api_key: str = "test-key") -> CogneeClient:
     return CogneeClient(
         api_key=api_key,
         base_url="https://cognee.test",
+        tenant_id="",  # pinned: the developer's .env must not decide what a unit test sends
         timeout=2.0,
         transport=httpx.MockTransport(handler),
     )
@@ -1006,8 +1007,10 @@ async def test_cognee_add_retries_as_json_when_multipart_is_rejected(
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == ADD_PATH:
             content_types.append(request.headers.get("content-type", ""))
-            if len(content_types) == 1:
-                return httpx.Response(415, json={"detail": "unsupported media type"})
+            return httpx.Response(415, json={"detail": "unsupported media type"})
+        if request.url.path == "/api/v1/add_text":
+            content_types.append(request.headers.get("content-type", ""))
+            assert "textData" in request.content.decode("utf-8")
             return httpx.Response(200, json={"id": "ds-1"})
         return httpx.Response(200, json={"status": "ok"})
 
@@ -1037,18 +1040,42 @@ async def test_cognee_raises_provider_unavailable_on_transport_failure() -> None
         await mock_client(handler).cognify(dataset_name="munshiji_x")
 
 
-async def test_cognee_sends_bearer_auth_and_per_merchant_dataset() -> None:
+async def test_cognee_speaks_both_auth_dialects_and_scopes_the_dataset() -> None:
+    """OSS wants a Bearer; the managed tenant documents X-Api-Key + X-Tenant-Id and 401s a
+    Bearer riding along. The configured tenant id is what says which world we are in."""
     captured: dict[str, object] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured["auth"] = request.headers.get("authorization")
+        captured["api_key"] = request.headers.get("x-api-key")
+        captured["tenant"] = request.headers.get("x-tenant-id")
         captured["body"] = request.content.decode()
         return httpx.Response(200, json=[])
 
-    await mock_client(handler).search("q", dataset_name=dataset_name_for("mer_1"))
+    oss = CogneeClient(
+        api_key="test-key",
+        base_url="https://cognee.test",
+        tenant_id="",
+        timeout=2.0,
+        transport=httpx.MockTransport(handler),
+    )
+    await oss.search("q", dataset_name=dataset_name_for("mer_1"))
     assert captured["auth"] == "Bearer test-key"
+    assert captured["api_key"] == "test-key"
     assert "munshiji_mer_1" in str(captured["body"])
     assert "GRAPH_COMPLETION" in str(captured["body"])
+
+    managed = CogneeClient(
+        api_key="test-key",
+        base_url="https://cognee.test",
+        tenant_id="tenant-1",
+        timeout=2.0,
+        transport=httpx.MockTransport(handler),
+    )
+    await managed.search("q", dataset_name=dataset_name_for("mer_1"))
+    assert captured["auth"] is None
+    assert captured["api_key"] == "test-key"
+    assert captured["tenant"] == "tenant-1"
 
 
 async def test_cognee_health_never_raises() -> None:
