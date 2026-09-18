@@ -68,8 +68,30 @@ def require_merchant(session: Session, merchant_id: str) -> Merchant:
 
 
 def first_merchant(session: Session) -> Merchant | None:
-    """The demo database holds a single merchant; this is the convenience entry point."""
+    """The oldest merchant — what the ``"default"`` alias resolves to.
+
+    With one seeded shop this is simply *the* shop; with several it stays pinned to the shop
+    seeded with the largest ``years_open`` (Sharma), which is what the n8n workflows address.
+    """
     return session.scalars(select(Merchant).order_by(Merchant.created_at).limit(1)).first()
+
+
+def list_merchants(session: Session) -> list[Merchant]:
+    """Every seeded shop, oldest first — the login screen's account list."""
+    return list(session.scalars(select(Merchant).order_by(Merchant.created_at)))
+
+
+def merchant_by_phone(session: Session, phone_digits: str) -> Merchant | None:
+    """The merchant whose phone ends with these 10 digits, or ``None``.
+
+    A table scan — the demo holds three rows, so an index would be ceremony.
+    """
+    from munshiji.security import normalise_phone
+
+    for merchant in session.scalars(select(Merchant)):
+        if normalise_phone(merchant.phone) == phone_digits:
+            return merchant
+    return None
 
 
 # ── Customers ───────────────────────────────────────────────────────────────

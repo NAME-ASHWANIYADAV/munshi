@@ -17,6 +17,7 @@ __all__ = [
     "RateLimitedError",
     "ToolExecutionError",
     "ToolNotFoundError",
+    "UnauthorizedError",
     "ValidationError",
 ]
 
@@ -40,6 +41,11 @@ class MunshiJiError(Exception):
 class NotFoundError(MunshiJiError):
     status_code = 404
     code = "not_found"
+
+
+class UnauthorizedError(MunshiJiError):
+    status_code = 401
+    code = "unauthorized"
 
 
 class ValidationError(MunshiJiError):

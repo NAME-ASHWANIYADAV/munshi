@@ -22,9 +22,13 @@ __all__ = [
     "CATEGORY_MARGIN_TARGET",
     "CATEGORY_SHARES",
     "CO_OCCURRENCE",
+    "KIRANA_CATALOG",
     "CatalogItem",
+    "ShopCatalog",
+    "at_trade_margin",
     "by_category",
     "by_sku",
+    "get_catalog",
     "perishables",
 ]
 
@@ -1095,18 +1099,102 @@ def _sku_fraction(sku: str) -> float:
     return (total % 997) / 997.0
 
 
-def _at_trade_margin(items: tuple[CatalogItem, ...]) -> tuple[CatalogItem, ...]:
-    """Re-cost every SKU so its category lands inside :data:`CATEGORY_MARGIN_TARGET`."""
+def at_trade_margin(
+    items: tuple[CatalogItem, ...],
+    margin_targets: dict[str, tuple[float, float]],
+) -> tuple[CatalogItem, ...]:
+    """Re-cost every SKU so its category lands inside its ``margin_targets`` band.
+
+    Public because every shop-type catalogue module prices itself through the same rule —
+    authored MRPs stay, costs are derived, so margin analysis behaves identically whatever
+    the shelf holds.
+    """
     priced: list[CatalogItem] = []
     for item in items:
-        low, high = CATEGORY_MARGIN_TARGET[item.category]
+        low, high = margin_targets[item.category]
         margin = low + (high - low) * _sku_fraction(item.sku)
         cost = max(1, int(round(item.sell_paise * (1.0 - margin))))
         priced.append(replace(item, cost_paise=cost))
     return tuple(priced)
 
 
+def _at_trade_margin(items: tuple[CatalogItem, ...]) -> tuple[CatalogItem, ...]:
+    """Back-compat shim over :func:`at_trade_margin` with the kirana bands."""
+    return at_trade_margin(items, CATEGORY_MARGIN_TARGET)
+
+
 CATALOG: Final[tuple[CatalogItem, ...]] = _at_trade_margin(_LISTED)
+
+
+@dataclass(frozen=True, slots=True)
+class ShopCatalog:
+    """Everything category-shaped about one *type* of shop, bundled.
+
+    The generator reads only this object (via ``SeedProfile.catalog_key``), so a pharmacy and
+    a mobile-accessories counter run through exactly the same engine as the kirana — different
+    shelf, same physics. Every table is keyed on ``categories`` and the same invariants hold:
+    ``shares`` sums to 1.0, every ``co_occurrence`` row sums to 1.0, every category has a
+    margin band and a Hindi label.
+    """
+
+    key: str
+    categories: tuple[str, ...]
+    labels_hi: dict[str, str]
+    shares: dict[str, float]
+    co_occurrence: dict[str, dict[str, float]]
+    margin_targets: dict[str, tuple[float, float]]
+    items: tuple[CatalogItem, ...]
+
+    def validate(self) -> None:
+        """Assert the cross-table invariants; raises ``ValueError`` with the first breach."""
+        cats = set(self.categories)
+        if abs(sum(self.shares.values()) - 1.0) > 1e-6:
+            raise ValueError(f"{self.key}: shares sum to {sum(self.shares.values())}")
+        for table_name, keys in (
+            ("labels_hi", set(self.labels_hi)),
+            ("shares", set(self.shares)),
+            ("co_occurrence", set(self.co_occurrence)),
+            ("margin_targets", set(self.margin_targets)),
+        ):
+            if keys != cats:
+                raise ValueError(f"{self.key}: {table_name} keys != categories")
+        for anchor, row in self.co_occurrence.items():
+            if set(row) != cats:
+                raise ValueError(f"{self.key}: co_occurrence[{anchor}] keys != categories")
+            if abs(sum(row.values()) - 1.0) > 1e-6:
+                raise ValueError(f"{self.key}: co_occurrence[{anchor}] sums to {sum(row.values())}")
+        for item in self.items:
+            if item.category not in cats:
+                raise ValueError(f"{self.key}: SKU {item.sku} has unknown category {item.category}")
+        for category in self.categories:
+            if not any(item.category == category for item in self.items):
+                raise ValueError(f"{self.key}: category {category} has no SKUs")
+
+
+KIRANA_CATALOG: Final[ShopCatalog] = ShopCatalog(
+    key="kirana",
+    categories=CATEGORIES,
+    labels_hi=CATEGORY_LABELS_HI,
+    shares=CATEGORY_SHARES,
+    co_occurrence=CO_OCCURRENCE,
+    margin_targets=CATEGORY_MARGIN_TARGET,
+    items=CATALOG,
+)
+
+
+def get_catalog(key: str) -> ShopCatalog:
+    """The :class:`ShopCatalog` for a shop type; imports lazily so each shelf stays optional."""
+    if key == "kirana":
+        return KIRANA_CATALOG
+    if key == "pharmacy":
+        from munshiji.seed.catalog_pharmacy import PHARMACY_CATALOG
+
+        return PHARMACY_CATALOG
+    if key == "mobile":
+        from munshiji.seed.catalog_mobile import MOBILE_CATALOG
+
+        return MOBILE_CATALOG
+    raise KeyError(f"unknown shop catalogue: {key!r}")
 
 _BY_SKU: Final[dict[str, CatalogItem]] = {item.sku: item for item in CATALOG}
 _BY_CATEGORY: Final[dict[str, tuple[CatalogItem, ...]]] = {

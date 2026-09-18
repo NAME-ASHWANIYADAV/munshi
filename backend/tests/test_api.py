@@ -286,6 +286,8 @@ def test_openapi_documents_every_route(client: TestClient) -> None:
     paths = client.get("/openapi.json").json()["paths"]
     for expected in (
         "/api/health",
+        "/api/auth/login",
+        "/api/auth/shops",
         "/api/merchant/{merchant_id}",
         "/api/merchant/{merchant_id}/dashboard",
         "/api/insights/{merchant_id}",

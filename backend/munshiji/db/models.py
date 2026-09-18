@@ -100,6 +100,8 @@ class Merchant(Base):
     locality: Mapped[str] = mapped_column(String(120), default="", nullable=False)
     language: Mapped[str] = mapped_column(String(12), default="hi-IN", nullable=False)
     phone: Mapped[str] = mapped_column(String(20), default="", nullable=False)
+    #: Salted digest of the demo login password (see ``munshiji.security``). Empty = no login.
+    password_hash: Mapped[str] = mapped_column(String(128), default="", nullable=False)
     soundbox_id: Mapped[str] = mapped_column(String(40), default="", nullable=False)
     opened_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
     monthly_rent_paise: Mapped[int] = mapped_column(Integer, default=0, nullable=False)

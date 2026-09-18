@@ -71,6 +71,11 @@ class SeedProfile:
     locality: str = "Lajpat Nagar"
     language: str = "hi-IN"
     phone: str = "+919811034572"
+    #: Demo login password (hashed at seed time — the DB never stores this string). One shared
+    #: word across shops keeps the venue pitch simple: "har dukaan ka password munshi123".
+    password: str = "munshi123"
+    #: Which shelf this shop carries — a :func:`munshiji.seed.catalog.get_catalog` key.
+    catalog_key: str = "kirana"
     soundbox_id: str = "PTM-SB-LJP-4417"
     monthly_rent_paise: int = 4_500_000  # ₹45,000
     business_hours_start: int = 7
@@ -197,10 +202,96 @@ BUSY_MARKET_PROFILE: Final[SeedProfile] = SeedProfile(
     margin_leak_category="staples",
 )
 
+#: A neighbourhood chemist. Different physics from a kirana: fewer, chunkier bills, a heavy
+#: walk-in share, digitised payments, and expiry as the *headline* inventory risk — medicine
+#: past its date is not markdown stock, it is a write-off with a compliance shadow.
+#: ``years_open=6`` keeps its ``created_at`` after Sharma's, so the "default" alias (oldest
+#: merchant) — and with it every n8n workflow — stays pinned to the kirana.
+GUPTA_MEDICAL_PROFILE: Final[SeedProfile] = SeedProfile(
+    key="gupta_medical_store",
+    shop_name="Gupta Medical Store",
+    shop_name_hi="गुप्ता मेडिकल स्टोर",
+    owner_name="Anita Gupta",
+    owner_name_hi="अनीता गुप्ता",
+    category="pharmacy",
+    catalog_key="pharmacy",
+    locality="Malviya Nagar",
+    phone="+919873046521",
+    soundbox_id="PTM-SB-MLV-2210",
+    monthly_rent_paise=5_500_000,
+    years_open=6,
+    customer_count=150,
+    base_txns_per_day=34,
+    min_txns_per_day=24,
+    max_txns_per_day=46,
+    walkin_share=0.42,
+    upi_share_start=0.60,
+    upi_share_end=0.78,
+    dormant_count=9,
+    dead_stock_count=3,
+    dead_stock_value_min_paise=120_000,
+    dead_stock_value_max_paise=380_000,
+    stockout_count=3,
+    expiry_count=3,
+    open_khata_count=22,
+    khata_over_60_count=5,
+    khata_partial_count=6,
+    settled_khata_count=30,
+    margin_leak_category="otc",
+)
+
+#: A mobile-accessories counter — the youngest shop, almost all walk-ins, fat margins on
+#: unbranded covers and glass, and dead stock with a face: covers cut for phone models nobody
+#: buys any more. No perishables, so ``expiry_count=0`` — the expiry engine simply finds an
+#: empty population rather than being switched off.
+KHAN_MOBILE_PROFILE: Final[SeedProfile] = SeedProfile(
+    key="khan_mobile_point",
+    shop_name="Khan Mobile Point",
+    shop_name_hi="ख़ान मोबाइल पॉइंट",
+    owner_name="Imran Khan",
+    owner_name_hi="इमरान ख़ान",
+    category="mobile",
+    catalog_key="mobile",
+    locality="Karol Bagh",
+    phone="+919811207344",
+    soundbox_id="PTM-SB-KBG-7731",
+    monthly_rent_paise=3_800_000,
+    years_open=3,
+    customer_count=110,
+    base_txns_per_day=22,
+    min_txns_per_day=14,
+    max_txns_per_day=34,
+    walkin_share=0.55,
+    upi_share_start=0.65,
+    upi_share_end=0.82,
+    dormant_count=8,
+    dead_stock_count=5,
+    dead_stock_value_min_paise=90_000,
+    dead_stock_value_max_paise=320_000,
+    stockout_count=2,
+    expiry_count=0,
+    open_khata_count=8,
+    khata_over_60_count=2,
+    khata_partial_count=3,
+    settled_khata_count=10,
+    margin_leak_category="chargers",
+)
+
 PROFILES: Final[dict[str, SeedProfile]] = {
     DEFAULT_PROFILE.key: DEFAULT_PROFILE,
     BUSY_MARKET_PROFILE.key: BUSY_MARKET_PROFILE,
+    GUPTA_MEDICAL_PROFILE.key: GUPTA_MEDICAL_PROFILE,
+    KHAN_MOBILE_PROFILE.key: KHAN_MOBILE_PROFILE,
 }
+
+#: The worlds `munshiji seed` builds, in "default"-resolution order: Sharma FIRST (oldest
+#: ``created_at`` via ``years_open``), so the n8n workflows and the runbook recipe keep
+#: addressing the kirana while the login screen offers three different shops.
+SEEDED_PROFILES: Final[tuple[SeedProfile, ...]] = (
+    DEFAULT_PROFILE,
+    GUPTA_MEDICAL_PROFILE,
+    KHAN_MOBILE_PROFILE,
+)
 
 
 def get_profile(key: str | None = None) -> SeedProfile:

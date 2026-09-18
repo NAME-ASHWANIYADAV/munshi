@@ -46,7 +46,7 @@ from munshiji.db.models import (
 from munshiji.logging import get_logger
 from munshiji.money import fmt_inr
 from munshiji.seed import festivals
-from munshiji.seed.catalog import CATALOG, CATEGORIES, CATEGORY_SHARES, CO_OCCURRENCE, CatalogItem
+from munshiji.seed.catalog import CatalogItem, ShopCatalog, get_catalog
 from munshiji.seed.profiles import (
     DEFAULT_PROFILE,
     FIRST_NAMES_FEMALE,
@@ -437,6 +437,7 @@ class _CustomerPlan:
 class _DayContext:
     """Per-day sampling tables, so the inner transaction loop stays cheap."""
 
+    categories: tuple[str, ...]
     anchor_cum: list[float]
     follow_cum: dict[str, list[float]]
     product_idx: dict[str, list[int]]
@@ -520,14 +521,17 @@ def generate(
     first_day = as_of - timedelta(days=days - 1)
     day_list = [first_day + timedelta(days=offset) for offset in range(days)]
 
-    items = list(CATALOG)
+    catalog = get_catalog(profile.catalog_key)
+    items = list(catalog.items)
     merchant = _build_merchant(profile, ids, as_of)
-    products, category_members = _build_products(merchant.id, items, ids, as_of, profile)
+    products, category_members = _build_products(
+        merchant.id, items, ids, as_of, profile, catalog.categories
+    )
     dead_idx, blocked_from = _choose_dead_stock(rng, items, day_list, profile)
     customers = _build_customers(profile, rng, ids, day_list)
     dormant_schedule = _plan_dormant(rng, customers, day_list, profile)
 
-    weights = _plan_day_weights(rng, day_list, profile)
+    weights = _plan_day_weights(rng, day_list, profile, catalog)
     txn_counts = _plan_txn_counts(weights, profile)
 
     sim = _simulate_sales(
@@ -535,6 +539,7 @@ def generate(
         rng=rng,
         ids=ids,
         profile=profile,
+        catalog=catalog,
         items=items,
         products=products,
         category_members=category_members,
@@ -547,9 +552,9 @@ def generate(
     )
     product_index = {product.id: index for index, product in enumerate(products)}
     customers_by_id = {plan.id: plan for plan in customers}
-    _rebuild_totals(sim, items, product_index, customers_by_id, days)
+    _rebuild_totals(sim, items, product_index, customers_by_id, days, catalog.categories)
     _tighten_dip(rng, sim, day_list, profile)
-    _rebuild_totals(sim, items, product_index, customers_by_id, days)
+    _rebuild_totals(sim, items, product_index, customers_by_id, days, catalog.categories)
 
     stock = _run_stock_ledger(rng, items, sim.consumption, day_list, blocked_from, profile)
     dead_signals = _apply_dead_stock(rng, items, products, stock, sim, day_list, dead_idx, profile)
@@ -611,6 +616,8 @@ def generate(
 
 
 def _build_merchant(profile: SeedProfile, ids: _IdFactory, as_of: date) -> Merchant:
+    from munshiji.security import hash_password
+
     opened = to_utc(_ist(as_of - timedelta(days=profile.years_open * 365), 9, 0))
     return Merchant(
         id=ids.new("mer"),
@@ -621,6 +628,7 @@ def _build_merchant(profile: SeedProfile, ids: _IdFactory, as_of: date) -> Merch
         locality=profile.locality,
         language=profile.language,
         phone=profile.phone,
+        password_hash=hash_password(profile.phone, profile.password),
         soundbox_id=profile.soundbox_id,
         opened_at=opened,
         monthly_rent_paise=profile.monthly_rent_paise,
@@ -636,11 +644,12 @@ def _build_products(
     ids: _IdFactory,
     as_of: date,
     profile: SeedProfile,
+    categories: Sequence[str],
 ) -> tuple[list[Product], dict[str, list[int]]]:
     """One ``Product`` per catalogue SKU. Stock is filled in later from the ledger."""
     created = to_utc(_ist(as_of - timedelta(days=profile.years_open * 365), 9, 0))
     products: list[Product] = []
-    members: dict[str, list[int]] = {category: [] for category in CATEGORIES}
+    members: dict[str, list[int]] = {category: [] for category in categories}
     for index, item in enumerate(items):
         products.append(
             Product(
@@ -798,7 +807,9 @@ def _weight_for_units(target: float, profile: SeedProfile) -> float:
     return (low + high) / 2.0
 
 
-def _plan_day_weights(rng: Random, day_list: Sequence[date], profile: SeedProfile) -> list[float]:
+def _plan_day_weights(
+    rng: Random, day_list: Sequence[date], profile: SeedProfile, catalog: ShopCatalog
+) -> list[float]:
     """Per-day demand weight, then the planted soft week.
 
     The dip is *calibrated against the series itself*: each of the last N days is set to the
@@ -813,7 +824,7 @@ def _plan_day_weights(rng: Random, day_list: Sequence[date], profile: SeedProfil
         progress = index / (count - 1) if count > 1 else 1.0
         weight = DOW_MULTIPLIER[day.weekday()]
         weight *= month_multiplier(day.day)
-        weight *= festivals.day_uplift(day, CATEGORY_SHARES)
+        weight *= festivals.day_uplift(day, catalog.shares)
         weight *= profile.trend_start + (profile.trend_end - profile.trend_start) * progress
         weight *= math.exp(rng.gauss(0.0, profile.daily_noise_sigma))
         weights.append(weight)
@@ -851,6 +862,7 @@ def _simulate_sales(
     rng: Random,
     ids: _IdFactory,
     profile: SeedProfile,
+    catalog: ShopCatalog,
     items: Sequence[CatalogItem],
     products: Sequence[Product],
     category_members: dict[str, list[int]],
@@ -892,7 +904,7 @@ def _simulate_sales(
         day_ord = day.toordinal()
         count = txn_counts[index]
         context = _day_context(
-            index, day, day_count, items, category_members, blocked_from, profile, weights
+            index, day, day_count, items, category_members, blocked_from, profile, weights, catalog
         )
 
         forced = (list(dormant_schedule.get(day_ord, ())) + list(first_visits.get(day_ord, ())))[
@@ -963,6 +975,7 @@ def _rebuild_totals(
     product_index: dict[str, int],
     customers_by_id: dict[str, _CustomerPlan],
     day_count: int,
+    categories: Sequence[str],
 ) -> None:
     """Recompute every rollup from the surviving rows. Idempotent; safe to run twice."""
     sim.daily_collection = [0] * day_count
@@ -971,8 +984,8 @@ def _rebuild_totals(
     sim.payment_counts = {method.value: 0 for method in PaymentMethod}
     sim.consumption = [[0.0] * day_count for _ in items]
     sim.last_sale_index = [-1] * len(items)
-    sim.category_revenue = {category: [0] * day_count for category in CATEGORIES}
-    sim.category_cost = {category: [0] * day_count for category in CATEGORIES}
+    sim.category_revenue = {category: [0] * day_count for category in categories}
+    sim.category_cost = {category: [0] * day_count for category in categories}
     sim.walkins = 0
     for plan in customers_by_id.values():
         plan.visits.clear()
@@ -1073,15 +1086,17 @@ def _day_context(
     blocked_from: Sequence[int | None],
     profile: SeedProfile,
     weights: Sequence[float],
+    catalog: ShopCatalog,
 ) -> _DayContext:
     """Festival-tilted category and product weights, today's costs, today's payment mix."""
-    uplift = {category: festivals.uplift_for(day, category) for category in CATEGORIES}
+    categories = catalog.categories
+    uplift = {category: festivals.uplift_for(day, category) for category in categories}
     festive = any(value > 1.0 for value in uplift.values())
 
     product_idx: dict[str, list[int]] = {}
     product_cum: dict[str, list[float]] = {}
     available: dict[str, bool] = {}
-    for category in CATEGORIES:
+    for category in categories:
         idxs: list[int] = []
         category_weights: list[float] = []
         for item_index in category_members[category]:
@@ -1098,15 +1113,17 @@ def _day_context(
         available[category] = bool(idxs)
 
     anchor_cum = _cumulative(
-        CATEGORY_SHARES[category] * uplift[category] if available[category] else 0.0
-        for category in CATEGORIES
+        catalog.shares[category] * uplift[category] if available[category] else 0.0
+        for category in categories
     )
     follow_cum = {
         anchor: _cumulative(
-            CO_OCCURRENCE[anchor][category] * uplift[category] if available[category] else 0.0
-            for category in CATEGORIES
+            catalog.co_occurrence[anchor][category] * uplift[category]
+            if available[category]
+            else 0.0
+            for category in categories
         )
-        for anchor in CATEGORIES
+        for anchor in categories
     }
 
     progress = index / (day_count - 1) if day_count > 1 else 1.0
@@ -1137,6 +1154,7 @@ def _day_context(
     )
 
     return _DayContext(
+        categories=tuple(categories),
         anchor_cum=anchor_cum,
         follow_cum=follow_cum,
         product_idx=product_idx,
@@ -1209,7 +1227,7 @@ def _build_basket(
     anchor_index = _pick(rng, context.anchor_cum)
     if anchor_index < 0:
         return []
-    anchor = CATEGORIES[anchor_index]
+    anchor = context.categories[anchor_index]
     follow_cum = context.follow_cum[anchor]
 
     chosen: list[tuple[int, float]] = []
@@ -1220,7 +1238,7 @@ def _build_basket(
             next_index = _pick(rng, follow_cum)
             if next_index < 0:
                 break
-            category = CATEGORIES[next_index]
+            category = context.categories[next_index]
         idxs = context.product_idx[category]
         if not idxs:
             continue

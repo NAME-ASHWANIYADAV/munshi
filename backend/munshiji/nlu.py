@@ -379,6 +379,23 @@ _LEXICON: dict[str, tuple[tuple[str, float], ...]] = {
         ("reorder", 0.8),
         ("inventory alerts", 1.0),
         ("stock levels", 1.0),
+        # Pharmacy phrasings — expiry is the chemist's headline inventory risk, and the
+        # suggestion chip asks it in exactly these words.
+        ("expiry", 1.0),
+        ("expire ho", 1.0),
+        ("expiry ke paas", 1.0),
+        ("kaun si dawai", 1.0),
+        ("dawaiyan expiry", 1.0),
+        ("एक्सपायरी", 1.0),
+        ("कौन सी दवाइयाँ", 1.0),
+        ("दवाइयाँ expiry", 1.0),
+        ("दवाई", 0.7),
+        # Mobile-shop phrasings — dead covers gathering dust are the same engine's story.
+        ("dhool kha raha", 1.0),
+        ("dhool kha rahe", 1.0),
+        ("धूल खा रहे", 1.0),
+        ("कवर-केस पड़े", 1.0),
+        ("pade pade", 0.8),
     ),
     "udhaar_summary": (
         ("kitna baki hai", 1.0),

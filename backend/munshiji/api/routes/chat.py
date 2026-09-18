@@ -11,6 +11,7 @@ from fastapi import APIRouter
 from munshiji.agent.loop import AgentLoop, TurnResult
 from munshiji.api.deps import DbSession, Providers, resolve_merchant
 from munshiji.api.routes.voice import audio_data_uri
+from munshiji.errors import ProviderUnavailableError
 from munshiji.schemas.action import ActionOut
 from munshiji.schemas.common import Meta
 from munshiji.schemas.conversation import ChatIn, ToolCallOut, TurnResultOut
@@ -71,8 +72,13 @@ async def chat(payload: ChatIn, session: DbSession, providers: Providers) -> Tur
     audio_uri: str | None = None
     client_tts = False
     if payload.speak and result.reply:
-        speech = await providers.tts.speak(result.reply, language=result.language)
-        audio_uri = audio_data_uri(speech)
-        client_tts = speech.client_should_synthesise
+        try:
+            speech = await providers.tts.speak(result.reply, language=result.language)
+            audio_uri = audio_data_uri(speech)
+            client_tts = speech.client_should_synthesise
+        except ProviderUnavailableError:
+            # The reply is composed and PAID FOR by this point — a flaky TTS vendor must not
+            # turn a finished answer into a 503. The client speaks it with its own voice.
+            client_tts = True
 
     return _to_payload(result, audio_uri=audio_uri, client_tts=client_tts)

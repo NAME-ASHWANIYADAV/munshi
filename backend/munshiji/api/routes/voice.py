@@ -10,6 +10,7 @@ from fastapi import APIRouter, File, Form, UploadFile, WebSocket, WebSocketDisco
 
 from munshiji.api.deps import Providers
 from munshiji.config import get_settings
+from munshiji.errors import ProviderUnavailableError
 from munshiji.db.base import get_sessionmaker
 from munshiji.logging import get_logger
 from munshiji.providers.factory import get_providers
@@ -179,15 +180,27 @@ async def voice_stream(websocket: WebSocket) -> None:
                 conversation_id = result["conversation_id"]
                 await send("reply", **result)
 
-                speech = await providers.tts.speak(result["reply"], language=language)
-                await send(
-                    "audio",
-                    audio_data_uri=audio_data_uri(speech),
-                    client_should_synthesise=speech.client_should_synthesise,
-                    text=result["reply"],
-                    duration_ms=speech.duration_ms,
-                    provider=speech.provider,
-                )
+                try:
+                    speech = await providers.tts.speak(result["reply"], language=language)
+                    await send(
+                        "audio",
+                        audio_data_uri=audio_data_uri(speech),
+                        client_should_synthesise=speech.client_should_synthesise,
+                        text=result["reply"],
+                        duration_ms=speech.duration_ms,
+                        provider=speech.provider,
+                    )
+                except ProviderUnavailableError:
+                    # The reply frame is already delivered; a dead TTS vendor only means the
+                    # client voices the text itself.
+                    await send(
+                        "audio",
+                        audio_data_uri=None,
+                        client_should_synthesise=True,
+                        text=result["reply"],
+                        duration_ms=0,
+                        provider="local",
+                    )
                 continue
 
             if kind == "close":

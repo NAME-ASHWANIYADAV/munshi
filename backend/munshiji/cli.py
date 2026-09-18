@@ -80,23 +80,30 @@ def seed(
         bool, typer.Option(help="Also compute the findings and build the memory graph.")
     ] = True,
 ) -> None:
-    """Generate a realistic shop history for the demo merchant."""
+    """Generate realistic shop histories — one world per seeded profile, Sharma first."""
     configure_logging()
     settings = get_settings()
     from munshiji.seed.generator import generate
+    from munshiji.seed.profiles import SEEDED_PROFILES
 
     if reset:
         reset_db()
     else:
         init_db()
 
-    with console.status("Generating shop history…"), session_scope() as session:
-        result = generate(session, seed=seed_value or settings.seed, days=days)
+    base_seed = seed_value or settings.seed
+    results = []
+    with console.status("Generating shop histories…"), session_scope() as session:
+        # Distinct seed per profile: _IdFactory draws from Random(seed), so a shared seed
+        # would mint the same primary keys twice. The offsets keep every world deterministic.
+        for offset, profile in enumerate(SEEDED_PROFILES):
+            results.append(generate(session, profile, seed=base_seed + offset, days=days))
 
     if warm:
         _warm_up()
 
-    console.print(Panel.fit(str(result), title="Seeded", border_style="green"))
+    for result in results:
+        console.print(Panel.fit(str(result), title="Seeded", border_style="green"))
     console.print("Next: [bold]munshiji insights[/bold] or [bold]munshiji demo[/bold]")
 
 
@@ -112,17 +119,19 @@ def _warm_up() -> None:
     container: the screen loads, three panels are empty, and the product looks broken on the one
     view a stranger forms of it.
     """
-    with console.status("Working out what needs attention…"), session_scope() as session:
-        merchant = first_merchant(session)
-        if merchant is None:
-            return
-        merchant_id = merchant.id
-        try:
-            from munshiji.insights.registry import refresh
+    from munshiji.repositories.core import list_merchants
 
-            refresh(session, merchant_id, as_of=now_ist())
-        except Exception as exc:  # pragma: no cover - a broken engine must not fail the seed
-            console.print(f"[yellow]insight refresh skipped:[/yellow] {exc}")
+    with console.status("Working out what needs attention…"), session_scope() as session:
+        merchant_ids = [merchant.id for merchant in list_merchants(session)]
+        if not merchant_ids:
+            return
+        for merchant_id in merchant_ids:
+            try:
+                from munshiji.insights.registry import refresh
+
+                refresh(session, merchant_id, as_of=now_ist())
+            except Exception as exc:  # pragma: no cover - a broken engine must not fail the seed
+                console.print(f"[yellow]insight refresh skipped ({merchant_id}):[/yellow] {exc}")
         session.commit()
 
     async def ingest() -> None:
@@ -130,10 +139,13 @@ def _warm_up() -> None:
         from munshiji.providers.factory import build_providers, resolve
 
         bundle = await resolve(build_providers())
-        with session_scope() as session:
-            await bundle.memory.ingest(merchant_id, ingest_all(session, merchant_id))
+        # Each shop's graph in its own dataset. For a shop Cognee has already met this is a
+        # small delta upload; the first-ever build happens once, offline, not at boot.
+        for merchant_id in merchant_ids:
+            with session_scope() as session:
+                await bundle.memory.ingest(merchant_id, ingest_all(session, merchant_id))
 
-    with console.status("Building the memory graph…"):
+    with console.status("Building the memory graphs…"):
         try:
             asyncio.run(ingest())
         except Exception as exc:  # pragma: no cover - memory is not worth failing a seed over
