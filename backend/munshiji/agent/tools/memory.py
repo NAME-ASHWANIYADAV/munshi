@@ -52,6 +52,22 @@ _RECOVERY_KEYS = ("revenue_recovered_paise", "recovered_paise", "collected_paise
 _COUNT_KEYS = ("redeemed", "messages_sent", "delivered_count", "messages_failed")
 
 
+_MD_NOISE = re.compile(r"\*\*|__|`+|\|[-— :]*\||^[-*•]\s+", re.MULTILINE)
+_REF_PARENS = re.compile(r"\s*\((?:act|cus|ins|prd|kht|note)[_:][^)]*\)")
+
+
+def _clean_spoken(text: str) -> str:
+    """Strip markdown furniture and internal ids out of text bound for a voice.
+
+    A live graph answers in markdown when it feels like it — bold, tables, ids in brackets.
+    TTS reads "star star pipe" out loud, and no merchant has ever wanted to hear an act_ ULID.
+    """
+    cleaned = _REF_PARENS.sub("", text or "")
+    cleaned = _MD_NOISE.sub(" ", cleaned)
+    cleaned = cleaned.replace("|", "; ")
+    return " ".join(cleaned.split())
+
+
 def _language_half(text: str, language: str) -> str:
     """The Hindi or English half of a bilingual node text."""
     cleaned = " ".join((text or "").split())
@@ -72,7 +88,7 @@ def _language_half(text: str, language: str) -> str:
 
 def _lead_sentence(text: str, language: str) -> str:
     """The first statement of a memory node: what happened, without the trailing analysis."""
-    half = _language_half(text, language)
+    half = _language_half(_clean_spoken(text), language)
     if not half:
         return ""
     cut = min(

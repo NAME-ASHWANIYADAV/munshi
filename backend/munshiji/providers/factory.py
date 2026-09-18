@@ -121,7 +121,10 @@ def build_providers(settings: Settings | None = None) -> ProviderBundle:
         try:
             from munshiji.providers.memory_cognee import CogneeMemory
 
-            memory = CogneeMemory(settings)
+            # No settings argument: CogneeMemory's first positional is the CLIENT, and handing
+            # it a Settings object survived until the first run with a real key — the probe
+            # then died on Settings.api_key and silently benched the whole live path.
+            memory = CogneeMemory()
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning("Cognee memory unavailable, staying local: %s", exc)
 

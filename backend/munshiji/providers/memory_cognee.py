@@ -194,7 +194,12 @@ class CogneeMemory:
             logger.info("cognee ingest: nothing changed for %s (%d facts)", dataset, len(facts))
             return 0
 
-        await self._client.add([documents[ref] for ref in changed_refs], dataset_name=dataset)
+        # The managed /add ingests synchronously, so one giant batch is one giant timeout.
+        # Chunks keep every call comfortably inside the client timeout; order is irrelevant.
+        chunk_size = 25
+        for start in range(0, len(changed_refs), chunk_size):
+            chunk = changed_refs[start : start + chunk_size]
+            await self._client.add([documents[ref] for ref in chunk], dataset_name=dataset)
         await self._client.cognify(dataset_name=dataset, background=not full_build)
         logger.info(
             "cognee ingested %d/%d documents into %s (%s)",
@@ -221,8 +226,16 @@ class CogneeMemory:
         to recover, so callers get the same filtering semantics as the local provider.
         """
         started = time.perf_counter()
+        # The completion behind GRAPH_COMPLETION follows instructions in the query. Every
+        # consumer of this provider speaks or renders chat text, so ask for prose once here
+        # rather than scraping markdown tables out of the answer at every call site.
+        styled = (
+            f"{query}\n\n"
+            "Answer in one or two short sentences, in the same language as the question. "
+            "Plain text only: no markdown, no tables, no bullet lists, no internal ids."
+        )
         results = await self._client.search(
-            query,
+            styled,
             dataset_name=dataset_name_for(merchant_id),
             search_type=SEARCH_TYPE_GRAPH_COMPLETION,
             top_k=max(limit, 1),
