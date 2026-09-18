@@ -642,7 +642,7 @@ async def test_sarvam_tts_raises_when_no_audio_comes_back() -> None:
 # ── Failure handling ────────────────────────────────────────────────────────────────────────
 
 
-async def test_a_500_is_retried_once_then_surfaces_as_provider_unavailable() -> None:
+async def test_a_500_is_retried_once_then_the_local_twin_composes_the_turn() -> None:
     calls: list[int] = []
 
     def handler(_request: httpx.Request) -> httpx.Response:
@@ -650,11 +650,11 @@ async def test_a_500_is_retried_once_then_surfaces_as_provider_unavailable() -> 
         return httpx.Response(500, json={"error": "upstream exploded"})
 
     llm = SarvamLLM(client=mock_client(handler))
-    with pytest.raises(ProviderUnavailableError) as excinfo:
-        await llm.complete([ChatMessage("user", "aaj")])
+    result = await llm.complete([ChatMessage("user", "aaj ka collection kitna hai?")])
 
-    assert len(calls) == 2, "one retry, then give up"
-    assert excinfo.value.status_code == 503
+    assert len(calls) == 2, "one retry against the vendor, then hand the turn to the twin"
+    assert result.provider == "local", "a vendor failure must never cost the merchant the turn"
+    assert result.text.strip(), "the local twin always says something"
 
 
 async def test_a_timeout_surfaces_as_provider_unavailable() -> None:
@@ -668,33 +668,47 @@ async def test_a_timeout_surfaces_as_provider_unavailable() -> None:
         await SarvamTTS(client=mock_client(handler)).speak("kuch bhi")
 
 
-async def test_a_client_error_is_not_retried() -> None:
+async def test_an_llm_timeout_never_503s_the_turn() -> None:
+    """The exact production failure of 18 Sep 2026: a Sarvam ReadTimeout mid-turn must be a
+    local-composed reply, not a dead conversation."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("too slow", request=request)
+
+    result = await SarvamLLM(client=mock_client(handler)).complete(
+        [ChatMessage("user", "aaj ka collection kitna hai?")]
+    )
+    assert result.provider == "local"
+    assert result.text.strip()
+
+
+async def test_a_client_error_is_not_retried_and_the_twin_answers() -> None:
     calls: list[int] = []
 
     def handler(_request: httpx.Request) -> httpx.Response:
         calls.append(1)
         return httpx.Response(401, json={"error": "bad key"})
 
-    with pytest.raises(ProviderUnavailableError):
-        await SarvamLLM(client=mock_client(handler)).complete([ChatMessage("user", "aaj")])
+    result = await SarvamLLM(client=mock_client(handler)).complete([ChatMessage("user", "aaj")])
     assert len(calls) == 1
+    assert result.provider == "local"
 
 
-async def test_a_missing_api_key_fails_fast_without_a_request() -> None:
+async def test_a_missing_api_key_falls_back_without_a_request() -> None:
     def handler(_request: httpx.Request) -> httpx.Response:  # pragma: no cover - must not run
         raise AssertionError("no request should be attempted without a key")
 
     client = mock_client(handler, api_key="")
-    with pytest.raises(ProviderUnavailableError):
-        await SarvamLLM(client=client).complete([ChatMessage("user", "aaj")])
+    result = await SarvamLLM(client=client).complete([ChatMessage("user", "aaj")])
+    assert result.provider == "local"
 
 
-async def test_a_non_json_body_surfaces_as_provider_unavailable() -> None:
+async def test_a_non_json_body_hands_the_turn_to_the_twin() -> None:
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, text="<html>gateway</html>")
 
-    with pytest.raises(ProviderUnavailableError):
-        await SarvamLLM(client=mock_client(handler)).complete([ChatMessage("user", "aaj")])
+    result = await SarvamLLM(client=mock_client(handler)).complete([ChatMessage("user", "aaj")])
+    assert result.provider == "local"
 
 
 # ── Live health probes never raise ──────────────────────────────────────────────────────────

@@ -5,11 +5,12 @@ from __future__ import annotations
 import time
 
 from munshiji.config import Settings, get_settings
+from munshiji.errors import ProviderUnavailableError
 from munshiji.integrations.sarvam.chat import chat_completion
 from munshiji.integrations.sarvam.client import SarvamClient
 from munshiji.logging import get_logger
 from munshiji.providers.base import ProviderHealth, ProviderMode
-from munshiji.providers.llm import ChatMessage, LLMResponse, ToolSpec
+from munshiji.providers.llm import ChatMessage, LLMProvider, LLMResponse, ToolSpec
 
 __all__ = ["SarvamLLM"]
 
@@ -19,9 +20,11 @@ _log = get_logger(__name__)
 class SarvamLLM:
     """Live :class:`~munshiji.providers.llm.LLMProvider` over Sarvam's chat API.
 
-    Every failure — transport, status, malformed body — leaves this class as a
-    :class:`ProviderUnavailableError`, which is the factory's cue to fall back to ``LocalLLM``
-    rather than break the conversation (SPEC.md §2.1).
+    Every vendor failure — transport, status, malformed body — is absorbed *per call*: the
+    turn is composed by the ``LocalLLM`` twin instead, with the response's ``provider`` field
+    flipped to ``"local"`` (SPEC.md §2.1). A flaky vendor may cost the merchant the live
+    phrasing, never the conversation. ``health()`` still reports the vendor's real state, which
+    is how the factory decides who starts the day.
     """
 
     name = "sarvam-chat"
@@ -34,12 +37,18 @@ class SarvamLLM:
         *,
         client: SarvamClient | None = None,
         model: str | None = None,
+        fallback: LLMProvider | None = None,
     ) -> None:
         # ``settings`` is positional so ``providers/factory.py`` can call ``SarvamLLM(settings)``.
         resolved = settings or get_settings()
         self.model = model or resolved.sarvam_llm_model
         self._client = client or SarvamClient(settings=resolved)
         self._owns_client = client is None
+        if fallback is None:
+            from munshiji.providers.llm_local import LocalLLM
+
+            fallback = LocalLLM()
+        self._fallback = fallback
 
     async def complete(
         self,
@@ -62,28 +71,37 @@ class SarvamLLM:
         occasionally overthinking anyway.
         """
         started = time.perf_counter()
-        parsed = await chat_completion(
-            self._client,
-            messages,
-            tools,
-            model=self.model,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            reasoning_effort="low",
-        )
-        if not parsed.text and not parsed.tool_calls:
-            _log.warning(
-                "sarvam returned neither text nor tool calls (finish=%s); retrying with double budget",
-                parsed.finish_reason,
-            )
+        try:
             parsed = await chat_completion(
                 self._client,
                 messages,
                 tools,
                 model=self.model,
                 temperature=temperature,
-                max_tokens=max_tokens * 2,
+                max_tokens=max_tokens,
                 reasoning_effort="low",
+            )
+            if not parsed.text and not parsed.tool_calls:
+                _log.warning(
+                    "sarvam returned neither text nor tool calls (finish=%s); retrying with double budget",
+                    parsed.finish_reason,
+                )
+                parsed = await chat_completion(
+                    self._client,
+                    messages,
+                    tools,
+                    model=self.model,
+                    temperature=temperature,
+                    max_tokens=max_tokens * 2,
+                    reasoning_effort="low",
+                )
+        except ProviderUnavailableError as exc:
+            # The dual-provider rule, applied per call: a slow or flaky vendor must never cost
+            # the merchant the turn. The offline twin answers, and the response's provider
+            # field flips to "local" so the UI stays honest about who spoke.
+            _log.warning("sarvam chat failed mid-turn (%s); composing with the local twin", exc)
+            return await self._fallback.complete(
+                messages, tools, temperature=temperature, language=language
             )
         latency_ms = int((time.perf_counter() - started) * 1000)
         return LLMResponse(
