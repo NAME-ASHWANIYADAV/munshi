@@ -22,6 +22,7 @@ from munshiji.api.routes import (
     events,
     health,
     insights,
+    khata,
     memory,
     merchant,
     voice,
@@ -113,7 +114,7 @@ def create_app() -> FastAPI:
             logger.info("%s: %s", exc.code, exc.message)
         return JSONResponse(status_code=exc.status_code, content=exc.to_payload())
 
-    for module in (health, merchant, insights, chat, voice, actions, memory, events):
+    for module in (health, merchant, insights, khata, chat, voice, actions, memory, events):
         app.include_router(module.router, prefix="/api")
 
     @app.get("/", include_in_schema=False)

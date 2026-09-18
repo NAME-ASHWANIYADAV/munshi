@@ -28,9 +28,12 @@ the factory can fall back with a logged warning instead of crashing the request.
 
 from __future__ import annotations
 
+import hashlib
 import time
 from collections.abc import Sequence
+from datetime import timedelta
 
+from munshiji.clock import now_utc
 from munshiji.db.enums import MemoryKind
 from munshiji.db.models import MemoryNode
 from munshiji.errors import ProviderUnavailableError
@@ -63,17 +66,34 @@ def dataset_name_for(merchant_id: str) -> str:
     return f"munshiji_{merchant_id}"
 
 
-def _document_for(fact: MemoryFact) -> CogneeDocument:
-    """Render a fact — including its edges — as one extractable document."""
+#: On the first ingest of a process whose dataset already exists remotely (i.e. the seed built
+#: the graph), only facts that occurred inside this window are uploaded — everything older is
+#: assumed to already be in the graph.
+_FRESHNESS_WINDOW = timedelta(hours=1)
+
+
+def _document_for(fact: MemoryFact, labels: dict[str, str] | None = None) -> CogneeDocument:
+    """Render a fact — including its edges — as one extractable document.
+
+    ``labels`` maps node refs to human names. Cognee's extractor builds its graph from the
+    entities it can READ: "This action targeted Sunita Devi (customer:cus_x)" produces an edge
+    to a person; "action:act_x targeted cus_01H…" produces an edge to a serial number. The ref
+    token stays in parentheses so results can still be parsed back onto our own nodes.
+    """
+    labels = labels or {}
     body = [fact.text]
     if fact.occurred_at is not None:
         body.append(f"This happened on {fact.occurred_at.isoformat()}.")
     if fact.edges:
         body.append("Relationships:")
-        body.extend(
-            f"- {fact.ref} {spec.rel.replace('_', ' ')} {spec.target} " f"(weight {spec.weight:g})"
-            for spec in fact.edges
-        )
+        for spec in fact.edges:
+            rel = spec.rel.replace("_", " ")
+            name = labels.get(spec.target)
+            subject = f"This {fact.kind.value}"
+            if name:
+                body.append(f"- {subject} {rel} {name} ({spec.target})")
+            else:
+                body.append(f"- {subject} {rel} {spec.target}")
     return CogneeDocument(ref=fact.ref, title=fact.label, text="\n".join(body))
 
 
@@ -93,6 +113,9 @@ class CogneeMemory:
         self._client = client or CogneeClient()
         self._fallback = fallback or LocalGraphMemory()
         self._mirror_local = mirror_local
+        #: dataset → {ref: sha1(document text)}. What this process has already uploaded, so a
+        #: conversation turn re-ingesting the whole shop uploads only what actually changed.
+        self._uploaded: dict[str, dict[str, str]] = {}
 
     @property
     def client(self) -> CogneeClient:
@@ -104,11 +127,27 @@ class CogneeMemory:
     # ── MemoryProvider ──────────────────────────────────────────────────────
 
     async def ingest(self, merchant_id: str, facts: Sequence[MemoryFact]) -> int:
-        """``add`` every fact to the merchant's dataset, then ``cognify`` it."""
+        """``add`` what changed to the merchant's dataset, then ``cognify`` it.
+
+        The local mirror always receives the FULL fact set — it is the offline twin and it is
+        cheap. The hosted side is delta-only: the agent loop re-derives every fact about the
+        shop after each executed action, and re-uploading ~450 unchanged documents plus a full
+        re-cognify on every turn would burn the credit budget in one rehearsal evening and add
+        half a minute of latency mid-conversation.
+
+        Three cases per call:
+        * first call, dataset already exists on the tenant → the seed built it; record the
+          fingerprints, upload only facts newer than the freshness window;
+        * first call, dataset absent → this IS the full build (seed CLI path): upload it all
+          and cognify synchronously, because the caller wants a finished graph;
+        * later calls → upload only documents whose rendered text changed, cognify in the
+          background so the turn is not held hostage to graph construction.
+        """
         if not facts:
             return 0
         dataset = dataset_name_for(merchant_id)
-        documents = [_document_for(fact) for fact in facts]
+        labels = {fact.ref: fact.label for fact in facts if fact.label}
+        documents = {fact.ref: _document_for(fact, labels) for fact in facts}
 
         if self._mirror_local:
             try:
@@ -116,10 +155,55 @@ class CogneeMemory:
             except Exception as exc:  # pragma: no cover - mirroring must never break ingest
                 logger.warning("local mirror of cognee ingest failed: %s", exc)
 
-        await self._client.add(documents, dataset_name=dataset)
-        await self._client.cognify(dataset_name=dataset)
-        logger.info("cognee ingested %d documents into %s", len(documents), dataset)
-        return len(documents)
+        fingerprints = {
+            ref: hashlib.sha1(document.as_text().encode("utf-8")).hexdigest()
+            for ref, document in documents.items()
+        }
+
+        seen = self._uploaded.get(dataset)
+        first_call = seen is None
+        full_build = False
+        if first_call:
+            try:
+                existing = await self._client.dataset_id(dataset)
+            except ProviderUnavailableError as exc:
+                # A deployment that cannot LIST datasets can still ADD to one. Treat "cannot
+                # tell" as "absent": a redundant full upload is recoverable, a silently empty
+                # graph is not.
+                logger.warning("cognee dataset listing unavailable (%s); assuming absent", exc)
+                existing = None
+            if existing is None:
+                full_build = True
+                changed_refs = list(documents)
+            else:
+                # The graph was built by an earlier process (the seed). Adopt its state and
+                # send only what is genuinely new since then.
+                cutoff = now_utc() - _FRESHNESS_WINDOW
+                by_ref = {fact.ref: fact for fact in facts}
+                changed_refs = [
+                    ref
+                    for ref, fact in by_ref.items()
+                    if fact.occurred_at is not None and fact.occurred_at >= cutoff
+                ]
+        else:
+            changed_refs = [ref for ref, digest in fingerprints.items() if seen.get(ref) != digest]
+
+        self._uploaded[dataset] = fingerprints
+
+        if not changed_refs:
+            logger.info("cognee ingest: nothing changed for %s (%d facts)", dataset, len(facts))
+            return 0
+
+        await self._client.add([documents[ref] for ref in changed_refs], dataset_name=dataset)
+        await self._client.cognify(dataset_name=dataset, background=not full_build)
+        logger.info(
+            "cognee ingested %d/%d documents into %s (%s)",
+            len(changed_refs),
+            len(documents),
+            dataset,
+            "full build" if full_build else "delta",
+        )
+        return len(changed_refs)
 
     async def search(
         self,

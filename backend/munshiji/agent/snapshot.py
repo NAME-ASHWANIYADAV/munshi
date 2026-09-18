@@ -62,6 +62,43 @@ def _unique_customers_today(session: Session, merchant_id: str, day: date) -> in
     )
 
 
+def _customer_split_today(session: Session, merchant_id: str, day: date) -> tuple[int, int]:
+    """(repeat, new) among today's named buyers.
+
+    New means first-ever recorded visit is today; everyone else who bought today is a repeat.
+    The merchant's own instinct for this number is exact — a wrong split would be noticed in
+    one glance, so it is computed from the transaction table, not estimated.
+    """
+    from munshiji.clock import day_bounds_ist
+
+    start, end = day_bounds_ist(day)
+    today_ids = set(
+        session.scalars(
+            select(func.distinct(Transaction.customer_id)).where(
+                Transaction.merchant_id == merchant_id,
+                Transaction.occurred_at >= start,
+                Transaction.occurred_at < end,
+                Transaction.customer_id.is_not(None),
+                Transaction.is_return.is_(False),
+            )
+        ).all()
+    )
+    if not today_ids:
+        return (0, 0)
+    seen_before = set(
+        session.scalars(
+            select(func.distinct(Transaction.customer_id)).where(
+                Transaction.merchant_id == merchant_id,
+                Transaction.occurred_at < start,
+                Transaction.customer_id.in_(today_ids),
+                Transaction.is_return.is_(False),
+            )
+        ).all()
+    )
+    repeat = len(today_ids & seen_before)
+    return (repeat, len(today_ids) - repeat)
+
+
 def _open_udhaar(session: Session, merchant_id: str) -> tuple[int, int]:
     """Total outstanding credit (paise) and the number of open entries."""
     entries = session.scalars(
@@ -152,6 +189,7 @@ def _collect(session: Session, merchant: Merchant, as_of: datetime) -> dict[str,
         "collected_paise": collected_paise,
         "txn_count": txn_count,
         "unique_customers": _unique_customers_today(session, merchant.id, today),
+        "customer_split": _customer_split_today(session, merchant.id, today),
         "baseline_paise": baseline_paise,
         "baseline_samples": baseline.sample_count,
         "delta_pct": delta,
@@ -277,6 +315,8 @@ def build_dashboard(
         collected=money(collected),
         transactions=txn_count,
         unique_customers=frame["unique_customers"],
+        repeat_customers=frame["customer_split"][0],
+        new_customers=frame["customer_split"][1],
         average_ticket=money(average_ticket),
         projected_close=money(projection.projected_paise)
         if projection.projected_paise is not None

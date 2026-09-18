@@ -35,7 +35,7 @@ from munshiji.agent.prompts import build_system_prompt
 from munshiji.agent.registry import ToolRegistry, get_registry
 from munshiji.agent.tools.base import ToolContext
 from munshiji.clock import now_ist
-from munshiji.db.enums import MemoryKind, TurnRole
+from munshiji.db.enums import ActionStatus, MemoryKind, TurnRole
 from munshiji.db.models import ActionRequest, Conversation, Insight, Merchant, Turn
 from munshiji.events import EventName, get_event_bus
 from munshiji.logging import get_logger
@@ -684,6 +684,16 @@ class AgentLoop:
 
     @staticmethod
     def _say_executed(action: ActionRequest, language: str) -> str:
+        """What the merchant hears once an approved action has been attempted.
+
+        The status is load-bearing. A dispatch that raised leaves ``result`` with no delivery
+        counts at all, and ``target_count`` as their fallback would quietly turn "nothing went
+        out" into "sent to everyone" — the one lie this product cannot afford, because the
+        merchant would then sit waiting on customers who were never contacted.
+        """
+        if action.status is not ActionStatus.EXECUTED:
+            return AgentLoop._say_action_failed(action, language)
+
         delivered = int(action.result.get("delivered_count", action.target_count) or 0)
         failed = int(action.result.get("failed_count", 0) or 0)
         if language.startswith("hi"):
@@ -695,6 +705,25 @@ class AgentLoop:
         if failed:
             text += f" {failed} numbers didn't go through."
         return text + " I'll keep you posted on who comes back."
+
+    @staticmethod
+    def _say_action_failed(action: ActionRequest, language: str) -> str:
+        """An approved action that reached nobody. Say that plainly, and offer to retry.
+
+        Nothing is half-sent here: the dispatch sits between two short transactions, so a
+        failure means the whole batch stayed home. The merchant is told the count that is still
+        waiting, so the number they hear is the number they can act on.
+        """
+        waiting = int(action.target_count or 0)
+        if language.startswith("hi"):
+            text = "भेज नहीं पाया — मैसेज वाली लाइन अभी बंद है। किसी के पास कुछ नहीं गया।"
+            if waiting:
+                text += f" {waiting} ग्राहक वैसे के वैसे हैं।"
+            return text + " लाइन ठीक होते ही दोबारा पूछूँगा।"
+        text = "Couldn't send it — the messaging line is down. Nothing went out to anyone."
+        if waiting:
+            text += f" All {waiting} customers are still waiting."
+        return text + " I'll ask you again once it's back."
 
     @staticmethod
     def _say_tools_failed(records: list[ToolCallRecord], language: str) -> str:

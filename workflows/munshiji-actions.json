@@ -73,7 +73,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// Gate 1 — authenticate the caller.\n// MunshiJi signs every dispatch with X-Munshiji-Token (N8N_WEBHOOK_TOKEN in its .env).\n// Set the same value in this workflow's MUNSHIJI_TOKEN variable, or leave it blank locally.\nconst expected = $env.MUNSHIJI_TOKEN || '';\nconst incoming = $json.headers?.['x-munshiji-token'] || '';\n\nif (expected && incoming !== expected) {\n  throw new Error('unauthorised: X-Munshiji-Token did not match');\n}\n\nconst body = $json.body ?? {};\n\n// Gate 2 — never act on something the merchant did not approve. MunshiJi already enforces this\n// in its own state machine; this is the second lock, on the other side of the wire.\nif (body?.meta?.approved !== true) {\n  throw new Error('refused: action is not marked approved');\n}\n\nreturn [{ json: body }];"
+        "jsCode": "// Gate 1 — authenticate the caller.\n// MunshiJi signs every dispatch with X-Munshiji-Token (N8N_WEBHOOK_TOKEN in its .env).\n// Set the same value in Settings → Variables as MUNSHIJI_TOKEN - both ends need it, because MunshiJi only reaches for the live provider when N8N_WEBHOOK_TOKEN is non-empty.\nconst expected = $vars.MUNSHIJI_TOKEN || '';\nconst incoming = $json.headers?.['x-munshiji-token'] || '';\n\nif (expected && incoming !== expected) {\n  throw new Error('unauthorised: X-Munshiji-Token did not match');\n}\n\nconst body = $json.body ?? {};\n\n// Gate 2 — never act on something the merchant did not approve. MunshiJi already enforces this\n// in its own state machine; this is the second lock, on the other side of the wire.\nif (body?.meta?.approved !== true) {\n  throw new Error('refused: action is not marked approved');\n}\n\nreturn [{ json: body }];"
       },
       "id": "b1000000-0000-4000-8000-000000000001",
       "name": "Verify token and approval",
@@ -94,13 +94,13 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "={{ $env.WHATSAPP_API_URL }}",
+        "url": "={{ $vars.WHATSAPP_API_URL }}",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
             {
               "name": "Authorization",
-              "value": "=Bearer {{ $env.WHATSAPP_TOKEN }}"
+              "value": "=Bearer {{ $vars.WHATSAPP_TOKEN }}"
             }
           ]
         },

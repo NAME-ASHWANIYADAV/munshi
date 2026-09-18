@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+from datetime import date
+from typing import Any
+
 from pydantic import BaseModel, Field
+from sqlalchemy.orm import Session
 
 from munshiji.agent.tools.base import Tool, ToolContext, ToolResult
 from munshiji.clock import ist_date_of
@@ -11,7 +15,7 @@ from munshiji.messaging import select_tone
 from munshiji.money import fmt_inr
 from munshiji.repositories.core import get_open_khata
 
-__all__ = ["AGING_BUCKETS", "TOOLS"]
+__all__ = ["AGING_BUCKETS", "TOOLS", "udhaar_ledger"]
 
 #: Inclusive upper bounds, in days. The last bucket is open-ended.
 AGING_BUCKETS: tuple[tuple[str, int | None], ...] = (
@@ -35,15 +39,21 @@ class UdhaarSummaryParams(BaseModel):
     )
 
 
-async def _udhaar_summary(ctx: ToolContext, params: UdhaarSummaryParams) -> ToolResult:
-    today = ist_date_of(ctx.as_of)
-    entries = get_open_khata(ctx.session, ctx.merchant_id)
+def udhaar_ledger(
+    session: Session, merchant_id: str, *, today: date, limit: int | None = None
+) -> dict[str, Any]:
+    """Aging buckets and the prioritised debtor list.
+
+    One computation shared by the conversational tool and ``GET /api/khata/{merchant_id}`` —
+    the khata page and the spoken answer must never disagree about who owes what.
+    """
+    entries = get_open_khata(session, merchant_id)
 
     customer_ids = {entry.customer_id for entry in entries}
     customers = (
         {
             customer.id: customer
-            for customer in ctx.session.query(Customer).filter(Customer.id.in_(customer_ids)).all()
+            for customer in session.query(Customer).filter(Customer.id.in_(customer_ids)).all()
         }
         if customer_ids
         else {}
@@ -88,27 +98,35 @@ async def _udhaar_summary(ctx: ToolContext, params: UdhaarSummaryParams) -> Tool
         key=lambda row: (int(row["amount_paise"]) * (1 + int(row["days_overdue"]) / 30)),
         reverse=True,
     )
-    top = rows[: params.limit]
+    top = rows[:limit] if limit else rows
 
     for label in buckets:
         buckets[label]["amount_display"] = fmt_inr(buckets[label]["amount_paise"])  # type: ignore[assignment]
 
     over_60 = buckets["60+"]["count"]
 
+    return {
+        "total_outstanding_paise": total,
+        "total_outstanding_display": fmt_inr(total),
+        "entry_count": len(rows),
+        "customer_count": len({row["customer_id"] for row in rows}),
+        "buckets": buckets,
+        "over_60_days_count": over_60,
+        "top_debtors": top,
+    }
+
+
+async def _udhaar_summary(ctx: ToolContext, params: UdhaarSummaryParams) -> ToolResult:
+    data = udhaar_ledger(
+        ctx.session, ctx.merchant_id, today=ist_date_of(ctx.as_of), limit=params.limit
+    )
+    total = data["total_outstanding_paise"]
+    count = data["entry_count"]
+    over_60 = data["over_60_days_count"]
     return ToolResult(
-        data={
-            "total_outstanding_paise": total,
-            "total_outstanding_display": fmt_inr(total),
-            "entry_count": len([row for row in rows]),
-            "customer_count": len({row["customer_id"] for row in rows}),
-            "buckets": buckets,
-            "over_60_days_count": over_60,
-            "top_debtors": top,
-        },
-        summary_en=f"{fmt_inr(total)} open across {len(rows)} entries ({over_60} over 60 days)",
-        summary_hi=(
-            f"{fmt_inr(total)} udhaar baaki, {len(rows)} entries, {over_60} 60 din se purani"
-        ),
+        data=data,
+        summary_en=f"{fmt_inr(total)} open across {count} entries ({over_60} over 60 days)",
+        summary_hi=(f"{fmt_inr(total)} udhaar baaki, {count} entries, {over_60} 60 din se purani"),
     )
 
 

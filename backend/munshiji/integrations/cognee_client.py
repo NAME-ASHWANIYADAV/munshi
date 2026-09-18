@@ -57,6 +57,8 @@ logger = get_logger(__name__)
 # Based on the cognee OSS FastAPI app (cognee/api/v1/*), which the hosted platform mirrors.
 API_PREFIX = "/api/v1"
 ADD_PATH = f"{API_PREFIX}/add"
+#: Managed-platform variant of ``add`` that takes plain JSON text instead of multipart.
+ADD_TEXT_PATH = f"{API_PREFIX}/add_text"
 COGNIFY_PATH = f"{API_PREFIX}/cognify"
 SEARCH_PATH = f"{API_PREFIX}/search"
 DATASETS_PATH = f"{API_PREFIX}/datasets"
@@ -163,7 +165,11 @@ class CogneeClient:
     def _headers(self) -> dict[str, str]:
         headers = {"Accept": "application/json"}
         if self.api_key:
+            # The OSS server reads a Bearer token; the managed platform has been seen reading
+            # X-Api-Key instead. Sending both costs nothing and whichever one the deployment
+            # understands wins — the other is ignored.
             headers["Authorization"] = f"Bearer {self.api_key}"
+            headers["X-Api-Key"] = self.api_key
         return headers
 
     async def aclose(self) -> None:
@@ -250,7 +256,7 @@ class CogneeClient:
             ADD_PATH,
             files=files,
             data={ADD_DATASET_FIELD: dataset_name},
-            tolerate=(400, 415, 422),
+            tolerate=(400, 404, 415, 422),
         )
 
         if not response.is_success:
@@ -265,7 +271,27 @@ class CogneeClient:
                     ADD_DATASET_FIELD: dataset_name,
                     "dataset_name": dataset_name,
                 },
+                tolerate=(400, 404, 415, 422),
             )
+
+        if not response.is_success:
+            # Third shape: the managed platform's per-document add_text. Last in the chain, so
+            # a failure here raises and names the real problem instead of a masked earlier 4xx.
+            logger.debug(
+                "cognee /add rejected JSON (%s); retrying per-document via %s",
+                response.status_code,
+                ADD_TEXT_PATH,
+            )
+            for document in documents:
+                response = await self._request(
+                    "POST",
+                    ADD_TEXT_PATH,
+                    json={
+                        "text": document.as_text(),
+                        ADD_DATASET_FIELD: dataset_name,
+                        "dataset_name": dataset_name,
+                    },
+                )
 
         payload = self._payload(response)
         return CogneeAddResult(
@@ -275,13 +301,19 @@ class CogneeClient:
             raw=payload,
         )
 
-    async def cognify(self, *, dataset_name: str) -> CogneeCognifyResult:
-        """Build the knowledge graph over a dataset (pipeline step 2 of 3)."""
-        response = await self._request(
-            "POST",
-            COGNIFY_PATH,
-            json={"datasets": [dataset_name], "dataset_name": dataset_name},
-        )
+    async def cognify(self, *, dataset_name: str, background: bool = False) -> CogneeCognifyResult:
+        """Build the knowledge graph over a dataset (pipeline step 2 of 3).
+
+        ``background=True`` asks the server to return immediately and build asynchronously —
+        used for mid-conversation delta ingests, where an extra thirty seconds of latency is a
+        worse failure than a graph that lags by one turn. Servers that do not know the flag
+        ignore it, which degrades to today's behaviour.
+        """
+        body: dict[str, Any] = {"datasets": [dataset_name], "dataset_name": dataset_name}
+        if background:
+            body["runInBackground"] = True
+            body["run_in_background"] = True
+        response = await self._request("POST", COGNIFY_PATH, json=body)
         payload = self._payload(response)
         status = "accepted"
         if isinstance(payload, dict):
@@ -308,6 +340,7 @@ class CogneeClient:
                 "datasets": [dataset_name],
                 "datasetName": dataset_name,
                 "top_k": top_k,
+                "topK": top_k,
             },
         )
         return parse_search_results(self._payload(response), limit=top_k)
@@ -372,7 +405,18 @@ class CogneeClient:
 _TEXT_KEYS = ("text", "content", "answer", "summary", "description", "value", "chunk", "name")
 _SCORE_KEYS = ("score", "similarity", "relevance", "rank")
 _NAME_KEYS = ("name", "title", "label", "node_name", "id")
-_LIST_KEYS = ("results", "data", "items", "search_results", "documents", "graphs", "answers")
+_LIST_KEYS = (
+    "results",
+    "data",
+    "items",
+    "search_results",
+    # The managed platform wraps search answers in a SINGULAR key — observed drift.
+    "search_result",
+    "searchResult",
+    "documents",
+    "graphs",
+    "answers",
+)
 
 
 def _first_id(payload: Any) -> str | None:

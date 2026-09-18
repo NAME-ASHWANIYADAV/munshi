@@ -115,6 +115,50 @@ def _distil(hits: list, as_of: datetime, language: str) -> dict[str, object]:
     if not hits:
         return {"summary": "", "when": "", "found": False}
 
+    # "Who came back?" recalls several return notes at once. Answering with only the top note
+    # would name one customer and stay silent about the rest — worse than useless to a merchant
+    # deciding whether the offer worked. When two or more return notes match, the fact worth
+    # saying is the roll-up: every name, and what they spent between them.
+    returns = [
+        hit
+        for hit in hits
+        if hit.kind is MemoryKind.NOTE and str(hit.ref).startswith("note:return-")
+    ]
+    if len(returns) >= 2:
+        names: list[str] = []
+        total = 0
+        for hit in returns:
+            name = (hit.label or "").split(" returned", 1)[0].strip()
+            if name and name not in names:
+                names.append(name)
+            amount = (hit.attrs or {}).get("amount_paise")
+            if isinstance(amount, int | float):
+                total += int(amount)
+        if len(names) >= 2:
+            joiner = " और " if language.startswith("hi") else " and "
+            spoken_names = f"{', '.join(names[:-1])}{joiner}{names[-1]}"
+            if language.startswith("hi"):
+                summary = f"{spoken_names} वापसी ऑफर के बाद दुकान लौटे"
+                if total > 0:
+                    summary += f" — करीब {fmt_inr(total)} की खरीदारी"
+                summary += "।"
+            else:
+                summary = f"{spoken_names} came back after the win-back offer"
+                if total > 0:
+                    summary += f" — about {fmt_inr(total)} in purchases"
+                summary += "."
+            # The summary sentence already carries the figure and the timing; handing the
+            # composer recovered_* or a "when" as well makes it say the same rupees twice.
+            return {
+                "found": True,
+                "summary": summary,
+                "top_ref": returns[0].ref,
+                "top_kind": MemoryKind.NOTE.value,
+                "when": "",
+                "returned_count": len(names),
+                "returned_names": names,
+            }
+
     preferred = next((hit for hit in hits if hit.kind is MemoryKind.ACTION), hits[0])
     attrs = preferred.attrs or {}
     outcomes = _outcomes_of(attrs)

@@ -48,14 +48,46 @@ BUSINESS_START = time(7, 0)
 BUSINESS_END = time(22, 0)
 
 
+def _read_pin() -> datetime | None:
+    """``MUNSHIJI_CLOCK_PIN`` — freeze "now" at one instant, for the demo build only.
+
+    The seed anchors 45 days of data to "today" at seed time, so a database seeded the evening
+    before shows the stage an empty "today" the next morning — the one number the whole opening
+    beat stands on. Pinning the clock (e.g. ``2026-09-19T18:05:00+05:30``) makes seed, rehearsal
+    and demo see the same instant: today is demo day with a full trading day behind it, inside
+    the compliance send-window, and every rehearsed number is the number on stage.
+
+    Frozen, not offset: a drifting pin would cross the 19:00 quiet-hours boundary mid-demo and
+    flip reminder sends from allowed to refused between rehearsal and the real run.
+
+    Unset (the default, and the whole test suite) means the real clock. Read per call so tests
+    can monkeypatch the environment without an import-order fight.
+    """
+    import os
+
+    raw = os.environ.get("MUNSHIJI_CLOCK_PIN", "").strip()
+    if not raw:
+        return None
+    try:
+        pinned = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if pinned.tzinfo is None:
+        pinned = pinned.replace(tzinfo=IST)
+    return pinned
+
+
 def now_utc() -> datetime:
     """Current instant, timezone-aware UTC."""
+    pinned = _read_pin()
+    if pinned is not None:
+        return pinned.astimezone(UTC)
     return datetime.now(UTC)
 
 
 def now_ist() -> datetime:
     """Current instant, expressed in IST."""
-    return datetime.now(UTC).astimezone(IST)
+    return now_utc().astimezone(IST)
 
 
 def today_ist() -> date:

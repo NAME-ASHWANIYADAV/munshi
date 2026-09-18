@@ -10,8 +10,10 @@ product's whole differentiator expressed as an assertion.
 
 from __future__ import annotations
 
+import json
 import statistics
 import time
+from collections import defaultdict
 from collections.abc import Iterator
 from datetime import timedelta
 
@@ -927,9 +929,13 @@ async def test_cognee_pipeline_adds_cognifies_and_searches(
     merchant = make_merchant(session)
     session.commit()
     seen: list[tuple[str, str]] = []
+    bodies: dict[str, list[bytes]] = defaultdict(list)
 
     def handler(request: httpx.Request) -> httpx.Response:
         seen.append((request.method, request.url.path))
+        bodies[request.url.path].append(request.content)
+        if request.url.path == DATASETS_PATH:
+            return httpx.Response(200, json={"datasets": []})
         if request.url.path == ADD_PATH:
             return httpx.Response(200, json={"dataset_id": "ds-1"})
         if request.url.path == COGNIFY_PATH:
@@ -962,7 +968,10 @@ async def test_cognee_pipeline_adds_cognifies_and_searches(
     ]
 
     assert await memory.ingest(merchant.id, facts) == 2
-    assert [path for _, path in seen] == [ADD_PATH, COGNIFY_PATH]
+    # First contact probes whether the dataset already exists (the seed may have built it),
+    # then uploads everything because it does not, then cognifies synchronously.
+    assert [path for _, path in seen] == [DATASETS_PATH, ADD_PATH, COGNIFY_PATH]
+
 
     context = await memory.search(merchant.id, "pichla offer kya hua", limit=3)
     assert context.provider == "live"
@@ -971,6 +980,20 @@ async def test_cognee_pipeline_adds_cognifies_and_searches(
     # Enriched from the local mirror the ingest wrote.
     assert "₹2,340 recovered" in context.hits[0].text
     assert "₹2,340 recovered" in context.rendered
+
+    # Re-ingesting the same facts must cost nothing: no add, no cognify, no credits.
+    seen.clear()
+    assert await memory.ingest(merchant.id, facts) == 0
+    assert seen == []
+
+    # A changed fact uploads exactly that one document, and cognify runs in the background so
+    # the conversation turn is not held hostage to graph construction.
+    facts[0].text = "Winback offer sent to 12 customers; 5 redeemed; ₹2,940 recovered."
+    seen.clear()
+    assert await memory.ingest(merchant.id, facts) == 1
+    assert [path for _, path in seen] == [ADD_PATH, COGNIFY_PATH]
+    cognify_body = json.loads(bodies[COGNIFY_PATH][-1])
+    assert cognify_body.get("runInBackground") is True
 
 
 async def test_cognee_add_retries_as_json_when_multipart_is_rejected(

@@ -58,6 +58,9 @@ class TodaySnapshot(ApiModel):
     collected: Money
     transactions: int = 0
     unique_customers: int = 0
+    #: Of today's named buyers, how many had bought before today vs never before.
+    repeat_customers: int = 0
+    new_customers: int = 0
     average_ticket: Money
     #: Projected close, from the historical intraday curve (None before the projection threshold).
     projected_close: Money | None = None

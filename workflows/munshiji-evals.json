@@ -1,0 +1,151 @@
+{
+  "name": "MunshiJi — Report Card",
+  "nodes": [
+    {
+      "parameters": {
+        "source": "dataTable",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "list",
+          "value": ""
+        },
+        "limitRows": false
+      },
+      "id": "f1000000-0000-4000-8000-000000000001",
+      "name": "When fetching a dataset row",
+      "type": "n8n-nodes-base.evaluationTrigger",
+      "typeVersion": 4.7,
+      "position": [
+        -380,
+        0
+      ],
+      "notes": "Create a Data Table named 'munshiji-evals' (Data tables in the left sidebar), import workflows/munshiji-evals-dataset.csv into it - columns input_text, expected_tool, expected_contains, expected_language - then pick that table here. The table id is instance-specific, so the import cannot preselect it. The workflow runs once per row, in sequence."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $vars.MUNSHIJI_API_URL }}/api/chat",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ merchant_id: 'default', text: $json.input_text, language: $json.expected_language }) }}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "f1000000-0000-4000-8000-000000000002",
+      "name": "Ask MunshiJi",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -140,
+        0
+      ],
+      "notes": "ChatIn's fields are merchant_id, text and language. The reply comes back as TurnResultOut: reply, language, tool_calls[].name and meta.latency_ms are everything the scorer needs."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Score one dataset row against what MunshiJi actually said. All four metrics are numbers\n// because the Evaluation node records numeric metrics; the three booleans go out as 0/1.\nconst row = $('When fetching a dataset row').first().json;\nconst turn = $json;\n\nconst reply = [turn.reply, turn.reply_display].filter(Boolean).join(' ');\nconst tools = (turn.tool_calls ?? []).map((call) => call.name);\n\nconst toolMatch = tools.includes(row.expected_tool) ? 1 : 0;\nconst factPresent = row.expected_contains && reply.includes(row.expected_contains) ? 1 : 0;\nconst languageOk =\n  typeof turn.language === 'string' &&\n  turn.language.toLowerCase().startsWith(String(row.expected_language || '').toLowerCase())\n    ? 1\n    : 0;\nconst latencyMs = turn.meta?.latency_ms ?? 0;\n\nreturn [{ json: {\n  tool_match: toolMatch,\n  fact_present: factPresent,\n  language_ok: languageOk,\n  latency_ms: latencyMs,\n  tools_called: tools.join(','),\n  reply: turn.reply ?? '',\n} }];"
+      },
+      "id": "f1000000-0000-4000-8000-000000000003",
+      "name": "Score the reply",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        80,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "setMetrics",
+        "metric": "customMetrics",
+        "metrics": {
+          "assignments": [
+            {
+              "id": "f1a00000-0000-4000-8000-0000000000b1",
+              "name": "tool_match",
+              "value": "={{ $json.tool_match }}",
+              "type": "number"
+            },
+            {
+              "id": "f1a00000-0000-4000-8000-0000000000b2",
+              "name": "fact_present",
+              "value": "={{ $json.fact_present }}",
+              "type": "number"
+            },
+            {
+              "id": "f1a00000-0000-4000-8000-0000000000b3",
+              "name": "language_ok",
+              "value": "={{ $json.language_ok }}",
+              "type": "number"
+            },
+            {
+              "id": "f1a00000-0000-4000-8000-0000000000b4",
+              "name": "latency_ms",
+              "value": "={{ $json.latency_ms }}",
+              "type": "number"
+            }
+          ]
+        }
+      },
+      "id": "f1000000-0000-4000-8000-000000000004",
+      "name": "Record metrics",
+      "type": "n8n-nodes-base.evaluation",
+      "typeVersion": 4.7,
+      "position": [
+        300,
+        0
+      ],
+      "notes": "Parameters kept minimal on purpose. If your n8n renders this node differently, select operation 'Set Metrics' and metric 'Custom Metrics' in the UI and re-add the four numbers - the scoring node upstream already computed them all."
+    }
+  ],
+  "connections": {
+    "When fetching a dataset row": {
+      "main": [
+        [
+          {
+            "node": "Ask MunshiJi",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ask MunshiJi": {
+      "main": [
+        [
+          {
+            "node": "Score the reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Score the reply": {
+      "main": [
+        [
+          {
+            "node": "Record metrics",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Kolkata"
+  },
+  "pinData": {},
+  "tags": [
+    {
+      "name": "munshiji"
+    }
+  ]
+}

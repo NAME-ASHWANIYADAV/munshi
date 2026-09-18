@@ -1,0 +1,406 @@
+{
+  "name": "MunshiJi — Shaam ka Hisaab",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 19 * * *"
+            }
+          ]
+        }
+      },
+      "id": "d1000000-0000-4000-8000-000000000001",
+      "name": "Shaam ke 7 baje",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -480,
+        40
+      ],
+      "notes": "19:00 IST, the hour the shutter comes half down and the merchant finally looks at their phone. The workflow's timezone is Asia/Kolkata, so the cron reads in local shop time."
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "munshiji-digest",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "d1000000-0000-4000-8000-000000000002",
+      "name": "On demand",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -480,
+        220
+      ],
+      "webhookId": "d1000000-0000-4000-8000-000000000002",
+      "notes": "The demo lever: POST an empty body with X-Munshiji-Token to run the digest on cue instead of waiting for 19:00."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Gate - the same X-Munshiji-Token check as the actions workflow, with one difference: the\n// schedule trigger has no HTTP request at all, so there are no headers to check. Only a run\n// that came in through the webhook has to prove who it is.\nif ($json.headers !== undefined) {\n  const expected = $vars.MUNSHIJI_TOKEN || '';\n  const incoming = $json.headers?.['x-munshiji-token'] || '';\n  if (expected && incoming !== expected) {\n    throw new Error('unauthorised: X-Munshiji-Token did not match');\n  }\n}\n\nreturn [{ json: { requested_at: new Date().toISOString() } }];"
+      },
+      "id": "d1000000-0000-4000-8000-000000000003",
+      "name": "Verify token",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -240,
+        130
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $vars.MUNSHIJI_API_URL }}/api/merchant/default",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "d1000000-0000-4000-8000-000000000004",
+      "name": "Fetch merchant",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -20,
+        130
+      ],
+      "notes": "First fetch decides the digest's language: merchant.language is 'hi' for the seeded shop."
+    },
+    {
+      "parameters": {
+        "url": "={{ $vars.MUNSHIJI_API_URL }}/api/merchant/default/dashboard",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "d1000000-0000-4000-8000-000000000005",
+      "name": "Fetch dashboard",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        200,
+        130
+      ],
+      "notes": "Chained after Fetch merchant, never beside it: two branches into one node make that node run once per branch."
+    },
+    {
+      "parameters": {
+        "url": "={{ $vars.MUNSHIJI_API_URL }}/api/insights/default",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "d1000000-0000-4000-8000-000000000006",
+      "name": "Fetch insights",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        420,
+        130
+      ],
+      "notes": "GET the stored feed, deliberately not POST /api/insights/default/refresh: refresh reruns every engine and takes as long as it takes. An on-stage canvas must contain zero unbounded-latency nodes; the backend refreshes on its own schedule."
+    },
+    {
+      "parameters": {
+        "url": "={{ $vars.MUNSHIJI_API_URL }}/api/actions/default?status=pending_approval",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "d1000000-0000-4000-8000-000000000007",
+      "name": "Fetch pending actions",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        640,
+        130
+      ],
+      "notes": "status=pending_approval is the ActionStatus enum value the API filters on - the digest only ever pitches something still waiting for a yes."
+    },
+    {
+      "parameters": {
+        "jsCode": "// One message in the merchant's own language. Everything here arrived from the four fetches\n// upstream, so a failure in this node is a formatting bug, never a data one.\nconst merchant = $('Fetch merchant').first().json;\nconst dash = $('Fetch dashboard').first().json;\nconst insights = $('Fetch insights').first().json.insights ?? [];\nconst actions = $('Fetch pending actions').first().json.actions ?? [];\n\nconst hi = (merchant.language || 'hi') === 'hi';\nconst today = dash.today ?? {};\nconst insight = insights[0] ?? null;\nconst action = actions[0] ?? null;\n\nconst lines = [];\nif (hi) {\n  lines.push(`🌆 शाम का हिसाब — ${merchant.shop_name}`);\n  lines.push('');\n  lines.push(`आज की वसूली: ${today.collected?.display ?? '₹0'} (${today.transactions ?? 0} लेन-देन, ${today.unique_customers ?? 0} ग्राहक)`);\n  if (today.projected_close) {\n    lines.push(`अनुमानित क्लोज़: ${today.projected_close.display}`);\n  }\n  lines.push(`खुला उधार: ${dash.open_udhaar?.display ?? '₹0'} (${dash.open_udhaar_count ?? 0} खाते)`);\n  if (insight) {\n    lines.push('');\n    lines.push(`आज की सबसे बड़ी बात: ${insight.title_hi || insight.title_en}`);\n  }\n  if (action) {\n    lines.push('');\n    lines.push(`एक काम रुका है: ${action.summary_hi || action.summary_en}`);\n    lines.push('भेज दूँ?');\n  }\n} else {\n  lines.push(`🌆 Shaam ka Hisaab — ${merchant.shop_name}`);\n  lines.push('');\n  lines.push(`Collected today: ${today.collected?.display ?? '₹0'} (${today.transactions ?? 0} transactions, ${today.unique_customers ?? 0} customers)`);\n  if (today.projected_close) {\n    lines.push(`Projected close: ${today.projected_close.display}`);\n  }\n  lines.push(`Open udhaar: ${dash.open_udhaar?.display ?? '₹0'} (${dash.open_udhaar_count ?? 0} khatas)`);\n  if (insight) {\n    lines.push('');\n    lines.push(`Biggest thing today: ${insight.title_en}`);\n  }\n  if (action) {\n    lines.push('');\n    lines.push(`One thing is waiting: ${action.summary_en || action.summary_hi}`);\n    lines.push('Send it?');\n  }\n}\n\nreturn [{ json: {\n  digest: lines.join('\\n'),\n  action_id: action ? action.id : null,\n  language: merchant.language || 'hi',\n} }];"
+      },
+      "id": "d1000000-0000-4000-8000-000000000008",
+      "name": "Compose digest",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        860,
+        130
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "sendAndWait",
+        "phoneNumberId": "",
+        "recipientPhoneNumber": "={{ $vars.MERCHANT_WHATSAPP }}",
+        "message": "={{ $json.digest }}",
+        "responseType": "approval",
+        "approvalOptions": {
+          "values": {
+            "approvalType": "double",
+            "approveLabel": "हाँ भेज दो",
+            "disapproveLabel": "अभी नहीं"
+          }
+        },
+        "options": {
+          "limitWaitTime": {
+            "values": {
+              "limitType": "afterTimeInterval",
+              "resumeAmount": 12,
+              "resumeUnit": "hours"
+            }
+          }
+        }
+      },
+      "id": "d1000000-0000-4000-8000-000000000009",
+      "name": "WhatsApp: send and wait",
+      "type": "n8n-nodes-base.whatsApp",
+      "typeVersion": 1.1,
+      "position": [
+        1080,
+        130
+      ],
+      "webhookId": "d1000000-0000-4000-8000-000000000009",
+      "notes": "Credential is deliberately unselected: open the node and pick your own WhatsApp Business Cloud (Meta) credential, then choose the sender in 'Phone Number ID'. Recipient is $vars.MERCHANT_WHATSAPP - the merchant's own verified phone, which is why this node ships enabled while the customer-facing sender in munshiji-actions ships disabled. If Meta setup stalls tonight, swap this single node for Telegram sendAndWait - same mechanics. The wait resumes by itself after 12 hours so a digest ignored overnight cannot pile up."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "d1c00000-0000-4000-8000-0000000000a1",
+              "leftValue": "={{ $json.data?.approved === true }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            },
+            {
+              "id": "d1c00000-0000-4000-8000-0000000000a2",
+              "leftValue": "={{ Boolean($('Compose digest').first().json.action_id) }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "d1000000-0000-4000-8000-00000000000a",
+      "name": "Approved with something to send?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1300,
+        130
+      ],
+      "notes": "The sendAndWait approval resumes with { data: { approved: true|false } }. Both must hold: the merchant tapped हाँ भेज दो AND the digest actually carried a pending action - an approval of a digest with nothing to send approves nothing."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $vars.MUNSHIJI_API_URL }}/api/actions/{{ $('Compose digest').first().json.action_id }}/approve",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ approved_by: 'merchant-whatsapp' }) }}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "d1000000-0000-4000-8000-00000000000b",
+      "name": "Approve the action",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1520,
+        40
+      ],
+      "notes": "Hits the same approval gate the app's own screen uses: the backend records consent, then executes through the action provider. approved_by is ApproveIn's only field."
+    },
+    {
+      "parameters": {},
+      "id": "d1000000-0000-4000-8000-00000000000c",
+      "name": "Done",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        1740,
+        40
+      ]
+    }
+  ],
+  "connections": {
+    "Shaam ke 7 baje": {
+      "main": [
+        [
+          {
+            "node": "Verify token",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "On demand": {
+      "main": [
+        [
+          {
+            "node": "Verify token",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verify token": {
+      "main": [
+        [
+          {
+            "node": "Fetch merchant",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch merchant": {
+      "main": [
+        [
+          {
+            "node": "Fetch dashboard",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch dashboard": {
+      "main": [
+        [
+          {
+            "node": "Fetch insights",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch insights": {
+      "main": [
+        [
+          {
+            "node": "Fetch pending actions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch pending actions": {
+      "main": [
+        [
+          {
+            "node": "Compose digest",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compose digest": {
+      "main": [
+        [
+          {
+            "node": "WhatsApp: send and wait",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "WhatsApp: send and wait": {
+      "main": [
+        [
+          {
+            "node": "Approved with something to send?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Approved with something to send?": {
+      "main": [
+        [
+          {
+            "node": "Approve the action",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Approve the action": {
+      "main": [
+        [
+          {
+            "node": "Done",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Kolkata",
+    "saveManualExecutions": true
+  },
+  "pinData": {},
+  "tags": [
+    {
+      "name": "munshiji"
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+input_text,expected_tool,expected_contains,expected_language
+आज की बिक्री कितनी हुई?,get_sales_summary,₹,hi
+How much did we collect today?,get_sales_summary,₹,en
+पिछले हफ्ते के मुकाबले बिक्री कैसी चल रही है?,compare_sales,₹,hi
+Compare this week's sales with last week,compare_sales,₹,en
+मेरे सबसे अच्छे ग्राहक कौन हैं?,get_top_customers,₹,hi
+Who are my top customers this month?,get_top_customers,₹,en
+कितना उधार बाकी है?,get_udhaar_summary,₹,hi
+How much udhaar is still pending?,get_udhaar_summary,₹,en
+दुकान की सेहत कैसी है?,get_merchant_health,दुकान,hi
+What should I worry about today?,get_insights,₹,en
+कौन से ग्राहक आजकल दुकान नहीं आ रहे?,find_dormant_customers,ग्राहक,hi
+Which customers have gone quiet lately?,find_dormant_customers,customer,en
+कौन सा माल खत्म होने वाला है?,get_inventory_alerts,स्टॉक,hi
+What is selling best this month?,get_product_performance,₹,en
+उधार वालों को याद दिला दो,send_udhaar_reminder,याद,hi

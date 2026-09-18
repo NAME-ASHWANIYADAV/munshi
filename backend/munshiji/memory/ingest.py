@@ -58,6 +58,7 @@ __all__ = [
     "insight_facts",
     "merchant_facts",
     "product_facts",
+    "return_visit_facts",
 ]
 
 logger = get_logger(__name__)
@@ -731,6 +732,20 @@ def action_facts(session: Session, merchant_id: str, *, limit: int = 100) -> lis
         ).all()
     )
 
+    # One name lookup for every recipient across the batch. Cognee's extractor links entities
+    # by NAME, not by our ids — an action that only says "12 customers" gives the graph nothing
+    # to join a return visit against.
+    recipient_ids = {
+        customer_id
+        for action in actions
+        for customer_id in _extract_ids(action.params or {}, "cus")
+    }
+    names: dict[str, str] = (
+        dict(session.execute(select(Customer.id, Customer.name).where(Customer.id.in_(recipient_ids))).all())
+        if recipient_ids
+        else {}
+    )
+
     facts: list[MemoryFact] = []
     for action in actions:
         status = _enum_value(action.status)
@@ -749,6 +764,14 @@ def action_facts(session: Session, merchant_id: str, *, limit: int = 100) -> lis
         )
         if action.estimated_impact_paise:
             english += f" Estimated impact was {fmt_inr(action.estimated_impact_paise)}."
+
+        # Name the audience when it is small enough to read. A broadcast stays a count, but a
+        # 12-person win-back names all twelve — those names are the join points the knowledge
+        # graph needs to connect this offer to each customer's later return visit.
+        if recipients and len(recipients) <= 15:
+            named = [names[customer_id] for customer_id in recipients if customer_id in names]
+            if named:
+                english += f" It went to {', '.join(named)}."
 
         # Prefer the authored Hindi summary — it already names the audience, so the count
         # goes in parentheses rather than being stated twice. The romanised tool name only
@@ -827,6 +850,115 @@ def action_facts(session: Session, merchant_id: str, *, limit: int = 100) -> lis
                 edges=edges,
             )
         )
+    return facts
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Return visits
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def return_visit_facts(session: Session, merchant_id: str, *, limit: int = 20) -> list[MemoryFact]:
+    """One atomic note per customer who came back after a win-back offer.
+
+    The action node already says the offer went out and what it recovered in aggregate. These
+    notes are deliberately SEPARATE documents: "who exactly returned and what did they spend"
+    must be answerable by joining offer → customer → return visit across records, not by
+    retrieving one composite sentence that happens to contain the whole answer. A memory layer
+    that can only replay paragraphs is a search index; this is what makes it a graph.
+
+    Every number is read back from what the outcome model wrote: ``redeemed_customer_ids`` and
+    the per-customer average ticket are exactly the rows that produced ``revenue_recovered``.
+    """
+    actions = list(
+        session.scalars(
+            select(ActionRequest)
+            .where(
+                ActionRequest.merchant_id == merchant_id,
+                ActionRequest.tool_name == "send_winback_offer",
+                ActionRequest.status == ActionStatus.EXECUTED,
+            )
+            .order_by(ActionRequest.requested_at.desc())
+            .limit(max(1, int(limit)))
+        ).all()
+    )
+
+    facts: list[MemoryFact] = []
+    for action in actions:
+        result = action.result or {}
+        redeemed_ids = [
+            customer_id
+            for customer_id in (result.get("redeemed_customer_ids") or [])
+            if isinstance(customer_id, str)
+        ]
+        if not redeemed_ids or action.executed_at is None:
+            continue
+
+        # Same helper the outcome simulation used, so the note and the aggregate agree.
+        from munshiji.providers.actions_local import avg_ticket_paise
+
+        customers = {
+            customer.id: customer
+            for customer in session.scalars(
+                select(Customer).where(Customer.id.in_(redeemed_ids))
+            ).all()
+        }
+        averages = avg_ticket_paise(session, redeemed_ids)
+        days = max(1, int(result.get("simulated_days_elapsed") or 1))
+        offer_day = to_ist(action.executed_at).date()
+        # An offer approved on stage simulates "N days later" while today is still today, so
+        # the return window can end on a calendar day that has no day node yet. Clamp the edge
+        # to a day that exists; the prose keeps the honest "within N days" phrasing either way.
+        returned_by = min(offer_day + timedelta(days=days), today_ist())
+
+        for customer_id in redeemed_ids:
+            customer = customers.get(customer_id)
+            if customer is None:
+                continue
+            # Whole rupees on purpose: the sentence already says "about", and a decimal point
+            # inside prose reads as a sentence break to the lead-sentence slicer downstream —
+            # "₹537.45" once came out of the composer as "करीब ₹537.।".
+            spent = (averages.get(customer_id, 0) // 100) * 100
+            spent_en = f" and bought goods worth about {fmt_inr(spent)} — their usual basket" if spent else ""
+            spent_hi = f" और करीब {fmt_inr(spent)} की खरीदारी की" if spent else ""
+            english = (
+                f"{customer.name} came back to the shop within {days} days of the win-back "
+                f"offer sent on {_date_en(offer_day)}{spent_en}."
+            )
+            hindi = f"{customer.name} वापसी ऑफर के {days} दिन के अंदर दुकान लौटे{spent_hi}।"
+
+            facts.append(
+                MemoryFact(
+                    kind=MemoryKind.NOTE,
+                    key=f"return-{action.id}-{customer_id}",
+                    label=f"{customer.name} returned after win-back",
+                    text=f"{english} {hindi}",
+                    attrs={
+                        "action_id": action.id,
+                        "customer_id": customer_id,
+                        "amount_paise": spent,
+                        "days_elapsed": days,
+                    },
+                    occurred_at=action.executed_at + timedelta(days=days),
+                    edges=[
+                        MemoryEdgeSpec(
+                            rel="about",
+                            target=node_ref(MemoryKind.CUSTOMER, customer_id),
+                            weight=W_SEMANTIC,
+                        ),
+                        MemoryEdgeSpec(
+                            rel="followed",
+                            target=node_ref(MemoryKind.ACTION, action.id),
+                            weight=W_SEMANTIC,
+                        ),
+                        MemoryEdgeSpec(
+                            rel="on_day",
+                            target=node_ref(MemoryKind.DAY, day_key(returned_by)),
+                            weight=W_CONTEXT,
+                        ),
+                    ],
+                )
+            )
     return facts
 
 
@@ -1015,6 +1147,7 @@ def ingest_all(session: Session, merchant_id: str) -> list[MemoryFact]:
     facts.extend(product_facts(session, merchant_id))
     facts.extend(insight_facts(session, merchant_id))
     facts.extend(action_facts(session, merchant_id))
+    facts.extend(return_visit_facts(session, merchant_id))
     facts.extend(conversation_facts(session, merchant_id))
     facts = _dedupe(facts)
     facts = _dedupe([*facts, *_backfill_edge_targets(session, merchant_id, facts)])

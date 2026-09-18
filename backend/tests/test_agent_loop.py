@@ -16,7 +16,10 @@ from sqlalchemy.orm import Session
 from munshiji.agent.loop import AgentLoop
 from munshiji.db.enums import ActionStatus, InsightKind, Severity
 from munshiji.db.models import ActionRequest, Customer, Insight, Merchant
+from munshiji.errors import ProviderUnavailableError
+from munshiji.providers.actions import ActionDispatch, ActionResult
 from munshiji.providers.actions_local import LocalActions
+from munshiji.providers.base import ProviderHealth, ProviderMode
 from munshiji.providers.factory import ProviderBundle
 from munshiji.providers.llm_local import LocalLLM
 from munshiji.providers.memory_local import LocalGraphMemory
@@ -261,6 +264,67 @@ async def test_a_failed_tool_is_reported_not_narrated_over(
     assert not re.search(
         r"₹\s?\d", result.reply
     ), f"a failed lookup must not produce a figure: {result.reply!r}"
+
+
+class _DeadActions:
+    """An actions provider whose webhook is down - what an n8n outage looks like from here."""
+
+    name = "dead-actions"
+    mode: ProviderMode = "live"
+
+    async def dispatch(self, dispatch: ActionDispatch) -> ActionResult:
+        raise ProviderUnavailableError("n8n webhook 'munshiji-winback' unreachable: ConnectError")
+
+    async def health(self) -> ProviderHealth:
+        return ProviderHealth(
+            name=self.name, kind="actions", mode=self.mode, ok=False, detail="unreachable"
+        )
+
+
+@pytest.mark.parametrize(
+    ("language", "ask", "confirm", "sent_claim"),
+    [
+        ("hi-IN", "unhe offer bhej do", "haan bhej do", "भेज दिया"),
+        ("en-IN", "send them an offer", "yes send it", "sent to"),
+    ],
+)
+async def test_a_dispatch_that_never_left_is_not_reported_as_sent(
+    session: Session,
+    bundle: ProviderBundle,
+    shop: Merchant,
+    language: str,
+    ask: str,
+    confirm: str,
+    sent_claim: str,
+) -> None:
+    """The expensive lie: a dead webhook must not sound like a delivered campaign.
+
+    A failed dispatch leaves ``result`` with no delivery counts, and the confirmation used to
+    fall back to ``target_count`` - so "nothing went out" was spoken as "sent to everyone". The
+    merchant would then wait a week on customers nobody ever messaged. Unreachable while actions
+    ran on the local provider, which cannot fail; reachable the moment n8n is real.
+    """
+    bundle.actions = _DeadActions()
+    loop = AgentLoop(bundle, publish_events=False)
+    _open_winback_insight(session, shop)
+
+    proposed = await loop.run_turn(session, shop, ask, language=language)
+    assert proposed.pending_action is not None
+
+    approved = await loop.run_turn(
+        session, shop, confirm, conversation_id=proposed.conversation_id, language=language
+    )
+    executed = approved.executed_action
+    assert executed is not None
+    assert executed.status is ActionStatus.FAILED
+
+    assert sent_claim not in approved.reply, (
+        f"claimed delivery on a dispatch that raised: {approved.reply!r}"
+    )
+    # The count still waiting is the number the merchant can act on, so it has to be said.
+    assert str(executed.target_count) in approved.reply, (
+        f"failure reply hid how many are still waiting: {approved.reply!r}"
+    )
 
 
 # ── Memory ──────────────────────────────────────────────────────────────────
