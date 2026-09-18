@@ -100,7 +100,7 @@
         "genericAuthType": "httpHeaderAuth",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ text: $json.text, datasetName: 'munshiji_' + ($vars.MUNSHIJI_MERCHANT_ID || 'default'), dataset_name: 'munshiji_' + ($vars.MUNSHIJI_MERCHANT_ID || 'default') }) }}",
+        "jsonBody": "={{ JSON.stringify({ textData: [$json.text], datasetName: 'munshiji_' + ($vars.MUNSHIJI_MERCHANT_ID || 'default') }) }}",
         "options": {
           "response": {
             "response": {
@@ -123,7 +123,7 @@
           "name": "Cognee API"
         }
       },
-      "notes": "Plain HTTP against Cognee's REST API rather than the n8n-nodes-cognee community node: that node is unverified, and n8n Cloud installs verified nodes only. The managed platform rejects the batched {data: [...]} shape on /add, so this posts one document per call to /add_text - no executeOnce, the node runs once per incoming item. Needs a Header Auth credential named 'Cognee API' - try Name: Authorization, Value: Bearer <key>; if the tenant answers 401, edit the credential to Name: X-Api-Key, Value: <bare key>."
+      "notes": "Plain HTTP against the tenant's documented AddPayloadDTO: textData is an ARRAY of plain-text documents. Runs once per incoming item. Credential: Header Auth named 'Cognee API' with Name X-Api-Key and the bare key as Value (no Bearer - the tenant 401s a Bearer)."
     },
     {
       "parameters": {
