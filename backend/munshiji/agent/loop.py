@@ -352,8 +352,12 @@ class AgentLoop:
         intent_confidence: float,
         started: datetime,
     ) -> TurnResult:
+        # This search only enriches the system prompt — the recall tool makes its own, fully
+        # budgeted call when memory IS the answer. Eight seconds buys the graph's phrasing when
+        # the tenant is quick and switches to the local mirror (same facts) when it is not,
+        # instead of spending the whole transport timeout before the first model call.
         memory_context = await self.providers.memory.search(
-            merchant.id, text, limit=5, hops=1, kinds=CONTEXT_MEMORY_KINDS
+            merchant.id, text, limit=5, hops=1, kinds=CONTEXT_MEMORY_KINDS, budget_seconds=8.0
         )
         snapshot = self._snapshot(session, merchant, as_of)
 

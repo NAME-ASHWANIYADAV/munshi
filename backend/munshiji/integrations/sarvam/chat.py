@@ -10,6 +10,7 @@ arguments as an object, others as a string — so :func:`parse_chat_response` ac
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -193,6 +194,43 @@ def _extract_tool_calls(message: Any) -> list[ToolCall]:
     return calls
 
 
+_TEXTUAL_CALL_NAME = re.compile(r"<tool_call>\s*([A-Za-z0-9_.\-]+)")
+_TEXTUAL_CALL_ARG = re.compile(
+    r"<arg_key>\s*(.*?)\s*</arg_key>\s*<arg_value>\s*(.*?)\s*(?:</arg_value>|(?=<arg_key>)|$)",
+    re.DOTALL,
+)
+
+
+def _salvage_textual_tool_calls(text: str) -> tuple[str, list[ToolCall]]:
+    """Recover tool calls the model wrote into its prose instead of the structured field.
+
+    ``sarvam-105b`` occasionally emits its native ``<tool_call>name <arg_key>…`` template as
+    plain content — often with mangled closing tags. Spoken aloud, that markup IS the reply, so
+    it must never survive here: parse what can be parsed, and strip the markup from the text
+    either way (an empty text is handled upstream; markup read out loud is not).
+    """
+    if "<tool_call>" not in text:
+        return text, []
+    calls: list[ToolCall] = []
+    for index, segment in enumerate(text.split("<tool_call>")[1:]):
+        name_match = _TEXTUAL_CALL_NAME.match(f"<tool_call>{segment}")
+        if not name_match:
+            continue
+        arguments = {
+            key.strip(): re.sub(r"(?:</?[a-zA-Z0-9]*/?>+|\s)+$", "", value)
+            for key, value in _TEXTUAL_CALL_ARG.findall(segment)
+            if key.strip()
+        }
+        calls.append(
+            ToolCall(id=f"call_text_{index}", name=name_match.group(1), arguments=arguments)
+        )
+    if calls:
+        _log.warning("sarvam wrote %d tool call(s) as text; salvaged them", len(calls))
+    else:
+        _log.warning("sarvam wrote tool-call markup as text and it was not parseable; stripped")
+    return text.split("<tool_call>", 1)[0].strip(), calls
+
+
 def parse_chat_response(payload: dict[str, Any], *, fallback_model: str = "") -> ParsedCompletion:
     """Reduce a completion body to text + tool calls, tolerating several response shapes."""
     choices = payload.get("choices")
@@ -204,6 +242,8 @@ def parse_chat_response(payload: dict[str, Any], *, fallback_model: str = "") ->
 
     tool_calls = _extract_tool_calls(scope)
     text = _extract_text(scope)
+    if not tool_calls:
+        text, tool_calls = _salvage_textual_tool_calls(text)
     finish = find_value(first, FINISH_KEYS, accept=_is_text)
     model = find_value(payload, ("model",), accept=_is_text)
 

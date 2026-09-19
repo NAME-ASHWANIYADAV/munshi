@@ -86,8 +86,13 @@ class LocalGraphMemory:
         limit: int = 6,
         hops: int = 1,
         kinds: Sequence[MemoryKind] | None = None,
+        budget_seconds: float | None = None,
     ) -> MemoryContext:
-        """BM25 seeds → ``hops`` of graph expansion → a rendered, provenance-carrying block."""
+        """BM25 seeds → ``hops`` of graph expansion → a rendered, provenance-carrying block.
+
+        ``budget_seconds`` is part of the provider protocol but meaningless here — this search
+        is a couple of SQLite queries and always answers within the smallest useful budget.
+        """
         session = self.open_session()
         try:
             return retrieval.search(

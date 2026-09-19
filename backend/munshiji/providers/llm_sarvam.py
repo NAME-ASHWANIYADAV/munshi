@@ -31,6 +31,21 @@ class SarvamLLM:
     mode: ProviderMode = "live"
     kind = "llm"
 
+    #: One patient attempt for chat. ``sarvam-105b`` reasons before it answers, so a heavy
+    #: turn can legitimately take longer than the shared 20s default — which read the wait as
+    #: failure, and the client's retry then spent the same budget again on a request that was
+    #: never going to get faster. On a real timeout the local twin is the correct next step,
+    #: not a second wait.
+    CHAT_TIMEOUT_SECONDS = 40.0
+
+    #: After a mid-turn failure, answer from the local twin without asking the vendor first.
+    #: An agent turn makes several completions back to back (choose tools → compose), and
+    #: without this a single slow spell cost the full timeout on *every* one of them — a
+    #: 40s budget times three calls walked straight past the app's whole turn budget. Sixty
+    #: seconds is long enough to cover the rest of the current turn and short enough that the
+    #: vendor gets another chance by the merchant's next question.
+    BENCH_SECONDS = 60.0
+
     def __init__(
         self,
         settings: Settings | None = None,
@@ -42,8 +57,11 @@ class SarvamLLM:
         # ``settings`` is positional so ``providers/factory.py`` can call ``SarvamLLM(settings)``.
         resolved = settings or get_settings()
         self.model = model or resolved.sarvam_llm_model
-        self._client = client or SarvamClient(settings=resolved)
+        self._client = client or SarvamClient(
+            settings=resolved, timeout=self.CHAT_TIMEOUT_SECONDS, max_retries=0
+        )
         self._owns_client = client is None
+        self._benched_until = 0.0
         if fallback is None:
             from munshiji.providers.llm_local import LocalLLM
 
@@ -70,6 +88,10 @@ class SarvamLLM:
         roomy budget keeps the answer inside the window; the one retry below covers the model
         occasionally overthinking anyway.
         """
+        if time.monotonic() < self._benched_until:
+            return await self._fallback.complete(
+                messages, tools, temperature=temperature, language=language
+            )
         started = time.perf_counter()
         try:
             parsed = await chat_completion(
@@ -82,6 +104,18 @@ class SarvamLLM:
                 reasoning_effort="low",
             )
             if not parsed.text and not parsed.tool_calls:
+                # The model spent its whole budget thinking and said nothing. A retry with a
+                # doubled budget usually lands — but only when the vendor is answering at
+                # normal speed. If the first attempt already crawled, a second, longer
+                # generation will just eat the turn; hand the composition to the local twin.
+                elapsed = time.perf_counter() - started
+                if elapsed > 15.0:
+                    raise ProviderUnavailableError(
+                        f"empty completion (finish={parsed.finish_reason}) after {elapsed:.0f}s; "
+                        "vendor too slow to retry",
+                        provider="sarvam",
+                        path="/v1/chat/completions",
+                    )
                 _log.warning(
                     "sarvam returned neither text nor tool calls (finish=%s); retrying with double budget",
                     parsed.finish_reason,
@@ -99,7 +133,13 @@ class SarvamLLM:
             # The dual-provider rule, applied per call: a slow or flaky vendor must never cost
             # the merchant the turn. The offline twin answers, and the response's provider
             # field flips to "local" so the UI stays honest about who spoke.
-            _log.warning("sarvam chat failed mid-turn (%s); composing with the local twin", exc)
+            self._benched_until = time.monotonic() + self.BENCH_SECONDS
+            _log.warning(
+                "sarvam chat failed mid-turn (%s); composing with the local twin and benching "
+                "the vendor for %.0fs",
+                exc,
+                self.BENCH_SECONDS,
+            )
             return await self._fallback.complete(
                 messages, tools, temperature=temperature, language=language
             )

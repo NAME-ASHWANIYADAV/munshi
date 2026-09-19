@@ -40,6 +40,20 @@ Invoke-RestMethod -Method Post -Uri $b -ContentType 'application/json' -Body ('{
 ```
 Reply mein "10 ग्राहकों के लिए ऑफर तैयार... भेज दूं?" aana chahiye. **Isके baad app se approve MAT karna** — ye stage ke liye hai.
 
+**7. Teeno dukaanein garam karo** (har Render boot ke baad har dukaan ki PEHLI turn 30–60s leti hai — providers + memory warm-up. Ye teen lines wo keemat subah hi chuka deti hain, judge kabhi nahi):
+```powershell
+$b='https://munshiji-api-pr8v.onrender.com/api/chat'
+$shops=Invoke-RestMethod 'https://munshiji-api-pr8v.onrender.com/api/auth/shops'
+foreach ($s in $shops.shops) { Invoke-RestMethod -Method Post -Uri $b -ContentType 'application/json' -Body ('{"merchant_id":"'+$s.merchant_id+'","text":"namaste","language":"hi-IN"}') | Out-Null; Write-Host ("warm: " + $s.shop_name) }
+```
+
+**8. Login yaad rakho (app + judges dono ke liye):**
+- Har dukaan ka password: **munshi123** (login screen ke "डेमो दुकानें" mein bhi dikha hai — dukaan pe tap karo, number-password khud bhar jaata hai)
+- Sharma General Store (kirana, hero demo): **98110 34572**
+- Gupta Medical Store (pharmacy): **98730 46521**
+- Khan Mobile Point (mobile accessories): **98112 07344**
+- Demo Sharma pe hi chalega ("default" = Sharma hi hai; n8n/digest sab Sharma pe pinned). Judge ko variety dikhani ho toh logout (upar status dot → भाषा बदलें) → Gupta ya Khan mein login — chips bhi us dhande ke ho jaate hain (chemist se expiry pucho, mobile wale se dhool khate covers).
+
 **⛔ VENUE PE KABHI NAHI:** reseed, Render manual deploy, n8n workflows edit, digest ka dry-run (action consume ho jata hai).
 
 ---
@@ -74,6 +88,9 @@ B ki line: *"Ye jawab kisi ek record mein exist nahi karta — Cognee ne knowled
 
 **2:30–3:00 · Close (A)**
 Dukaan pe wapas, repeat/new split dikhao: *"78 paise ka win-back, ek customer lauta toh barabar. Soundbox paisa aane ki awaaz hai — MunshiJi agla paisa lane ka haath. Aur iski voice-khata wo cash aur udhaar economy pakadti hai jo QR code tak kabhi pahunchti hi nahi. Wahi data hai jo Paytm ke paas nahi hai."*
+
+**Agar 20 second bachein (ya judge "sirf kirana?" pooche) — MULTI-SHOP FLASH:**
+Logout → login screen pe "डेमो दुकानें" dikhao → **Gupta Medical Store** pe tap → login. *"Same munim, alag dhandha — chemist ke liye expiry hi sabse badi inventory risk hai, aur suggestion chips tak uske dhande ke hain. Teen alag duniya, ek engine — pharmacy, mobile shop, kirana. Paytm ke har merchant vertical ke liye yehi ek app hai."* (Chip dabao: "कौन सी दवाइयाँ expiry के पास हैं?" — jawab Gupta ke apne stock se aata hai.)
 
 ---
 

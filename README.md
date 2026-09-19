@@ -1,18 +1,3 @@
-> **This repository holds the backend, docs and n8n workflows.**
-> The React companion screen lives at
-> **[NAME-ASHWANIYADAV/paytm](https://github.com/NAME-ASHWANIYADAV/paytm)**.
->
-> ```bash
-> cd backend && python -m venv .venv && .venv/Scripts/pip install -e ".[dev]"
-> .venv/Scripts/python -m munshiji.cli seed --reset   # 180 days of shop history, ~3s
-> .venv/Scripts/python -m munshiji.cli demo           # the full two-conversation demo
-> .venv/Scripts/python -m pytest                      # 656 tests, offline, ~75s
-> ```
->
-> No API keys are required for any of the above.
-
----
-
 <div align="center">
 
 # MunshiJi · मुंशीजी

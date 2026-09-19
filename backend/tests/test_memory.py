@@ -987,11 +987,13 @@ async def test_cognee_pipeline_adds_cognifies_and_searches(
     assert await memory.ingest(merchant.id, facts) == 0
     assert seen == []
 
-    # A changed fact uploads exactly that one document, and cognify runs in the background so
-    # the conversation turn is not held hostage to graph construction.
+    # A changed fact uploads exactly that one document. The whole upload is a background task
+    # now — the merchant's reply must not wait on the hosted tenant — so the wire traffic is
+    # only observable after flush_uploads(), and cognify still runs server-side in background.
     facts[0].text = "Winback offer sent to 12 customers; 5 redeemed; ₹2,940 recovered."
     seen.clear()
     assert await memory.ingest(merchant.id, facts) == 1
+    await memory.flush_uploads()
     assert [path for _, path in seen] == [ADD_PATH, COGNIFY_PATH]
     cognify_body = json.loads(bodies[COGNIFY_PATH][-1])
     assert cognify_body.get("runInBackground") is True

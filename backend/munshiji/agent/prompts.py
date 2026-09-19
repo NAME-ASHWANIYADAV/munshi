@@ -130,7 +130,12 @@ def build_system_prompt(
         build_pending_action_block(pending_action),
     ]
     if language.startswith("hi"):
-        blocks.append("Jawaab Devanagari lipi mein dijiye, Hinglish shabdon ke saath.")
+        # The instruction itself is written in Devanagari: the model mirrors the script it
+        # reads, and a romanised sentence asking for Devanagari has been seen to lose.
+        blocks.append(
+            "ज़रूरी: अपना पूरा जवाब देवनागरी लिपि में ही लिखिए — रोमन (Latin) अक्षरों में बिल्कुल नहीं। "
+            "शब्द वही रखिए जो दुकानदार रोज़ बोलता है (धंधा, उधार, खाता, ग्राहक)।"
+        )
     else:
         blocks.append("Reply in English, keeping Indian retail vocabulary (udhaar, khata, kirana).")
     return "\n\n".join(block for block in blocks if block.strip())

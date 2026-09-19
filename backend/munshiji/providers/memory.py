@@ -125,8 +125,15 @@ class MemoryProvider(Protocol):
         limit: int = 6,
         hops: int = 1,
         kinds: Sequence[MemoryKind] | None = None,
+        budget_seconds: float | None = None,
     ) -> MemoryContext:
-        """Retrieve seed nodes lexically, then expand ``hops`` along the graph."""
+        """Retrieve seed nodes lexically, then expand ``hops`` along the graph.
+
+        ``budget_seconds`` caps how long a *live* backend may take before the provider serves
+        its local mirror instead. Callers that merely enrich a prompt pass a small budget; a
+        caller whose whole answer IS the memory (the recall tool) leaves it ``None`` and grants
+        the graph the full transport timeout. Instant providers ignore it.
+        """
         ...
 
     async def graph(self, merchant_id: str, *, limit: int = 200) -> GraphSnapshot:

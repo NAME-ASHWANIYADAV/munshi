@@ -28,6 +28,7 @@ the factory can fall back with a logged warning instead of crashing the request.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import time
 from collections.abc import Sequence
@@ -116,12 +117,21 @@ class CogneeMemory:
         #: dataset → {ref: sha1(document text)}. What this process has already uploaded, so a
         #: conversation turn re-ingesting the whole shop uploads only what actually changed.
         self._uploaded: dict[str, dict[str, str]] = {}
+        #: Live references to in-flight background delta uploads — asyncio keeps tasks only
+        #: weakly, so without this set a slow upload could be garbage-collected mid-flight.
+        self._upload_tasks: set[asyncio.Task[None]] = set()
 
     @property
     def client(self) -> CogneeClient:
         return self._client
 
+    async def flush_uploads(self) -> None:
+        """Wait for in-flight background delta uploads (tests, shutdown, the seed path)."""
+        while self._upload_tasks:
+            await asyncio.gather(*tuple(self._upload_tasks), return_exceptions=True)
+
     async def aclose(self) -> None:
+        await self.flush_uploads()
         await self._client.aclose()
 
     # ── MemoryProvider ──────────────────────────────────────────────────────
@@ -146,14 +156,23 @@ class CogneeMemory:
         if not facts:
             return 0
         dataset = dataset_name_for(merchant_id)
-        labels = {fact.ref: fact.label for fact in facts if fact.label}
-        documents = {fact.ref: _document_for(fact, labels) for fact in facts}
 
         if self._mirror_local:
             try:
                 await self._fallback.ingest(merchant_id, facts)
             except Exception as exc:  # pragma: no cover - mirroring must never break ingest
                 logger.warning("local mirror of cognee ingest failed: %s", exc)
+
+        # Conversation transcripts stay out of the hosted graph on purpose. GRAPH_COMPLETION
+        # synthesises its answer from the whole dataset — the kind filter below only prunes the
+        # recovered references — so uploaded transcripts end up with the graph reciting
+        # MunshiJi's own past sentences as "memory". The local mirror (above) keeps them, where
+        # kind filtering actually works, so conversation recall stays possible offline.
+        graph_facts = [fact for fact in facts if fact.kind is not MemoryKind.CONVERSATION]
+        if not graph_facts:
+            return 0
+        labels = {fact.ref: fact.label for fact in graph_facts if fact.label}
+        documents = {fact.ref: _document_for(fact, labels) for fact in graph_facts}
 
         fingerprints = {
             ref: hashlib.sha1(document.as_text().encode("utf-8")).hexdigest()
@@ -179,7 +198,7 @@ class CogneeMemory:
                 # The graph was built by an earlier process (the seed). Adopt its state and
                 # send only what is genuinely new since then.
                 cutoff = now_utc() - _FRESHNESS_WINDOW
-                by_ref = {fact.ref: fact for fact in facts}
+                by_ref = {fact.ref: fact for fact in graph_facts}
                 changed_refs = [
                     ref
                     for ref, fact in by_ref.items()
@@ -194,20 +213,40 @@ class CogneeMemory:
             logger.info("cognee ingest: nothing changed for %s (%d facts)", dataset, len(facts))
             return 0
 
-        # The managed /add ingests synchronously, so one giant batch is one giant timeout.
-        # Chunks keep every call comfortably inside the client timeout; order is irrelevant.
-        chunk_size = 25
-        for start in range(0, len(changed_refs), chunk_size):
-            chunk = changed_refs[start : start + chunk_size]
-            await self._client.add([documents[ref] for ref in chunk], dataset_name=dataset)
-        await self._client.cognify(dataset_name=dataset, background=not full_build)
-        logger.info(
-            "cognee ingested %d/%d documents into %s (%s)",
-            len(changed_refs),
-            len(documents),
-            dataset,
-            "full build" if full_build else "delta",
-        )
+        async def _upload() -> None:
+            # The managed /add ingests synchronously, so one giant batch is one giant timeout.
+            # Chunks keep every call comfortably inside the client timeout; order is irrelevant.
+            chunk_size = 25
+            for start in range(0, len(changed_refs), chunk_size):
+                chunk = changed_refs[start : start + chunk_size]
+                await self._client.add([documents[ref] for ref in chunk], dataset_name=dataset)
+            await self._client.cognify(dataset_name=dataset, background=not full_build)
+            logger.info(
+                "cognee ingested %d/%d documents into %s (%s)",
+                len(changed_refs),
+                len(documents),
+                dataset,
+                "full build" if full_build else "delta",
+            )
+
+        if full_build:
+            # The caller (the seed path) wants a finished graph and surfaces failures.
+            await _upload()
+            return len(changed_refs)
+
+        # Mid-conversation delta: the merchant's reply must not wait on a hosted upload that can
+        # take (or time out at) the full transport budget. The local mirror above already holds
+        # these facts, so a failed background upload costs only the graph's copy until the fact
+        # next changes — and says so in the log.
+        task = asyncio.create_task(_upload())
+        self._upload_tasks.add(task)
+
+        def _done(finished: asyncio.Task[None]) -> None:
+            self._upload_tasks.discard(finished)
+            if not finished.cancelled() and (exc := finished.exception()) is not None:
+                logger.warning("cognee delta upload failed in background: %s", exc)
+
+        task.add_done_callback(_done)
         return len(changed_refs)
 
     async def search(
@@ -218,6 +257,7 @@ class CogneeMemory:
         limit: int = 6,
         hops: int = 1,
         kinds: Sequence[MemoryKind] | None = None,
+        budget_seconds: float | None = None,
     ) -> MemoryContext:
         """Ask Cognee's graph, then shape the answer into ``MemoryHit`` objects.
 
@@ -235,18 +275,28 @@ class CogneeMemory:
             "Plain text only: no markdown, no tables, no bullet lists, no internal ids."
         )
         try:
-            results = await self._client.search(
+            live_search = self._client.search(
                 styled,
                 dataset_name=dataset_name_for(merchant_id),
                 search_type=SEARCH_TYPE_GRAPH_COMPLETION,
                 top_k=max(limit, 1),
             )
-        except ProviderUnavailableError as exc:
+            # ``budget_seconds`` cuts the wait short of the transport timeout: a caller that
+            # only enriches a prompt would rather have the mirror's facts now than the graph's
+            # phrasing twenty seconds from now.
+            if budget_seconds is not None:
+                results = await asyncio.wait_for(live_search, timeout=budget_seconds)
+            else:
+                results = await live_search
+        except (ProviderUnavailableError, TimeoutError) as exc:
             # A slow or absent graph must never cost the merchant the conversation. The local
             # mirror holds the same facts; serve those and SAY SO — the context's provider
             # field flips to "local", so nothing upstream can claim a live answer it did not
             # get. The dual-provider promise, applied per-call rather than only at boot.
-            logger.warning("cognee search failed (%s); serving the local mirror", exc.message)
+            detail = exc.message if isinstance(exc, ProviderUnavailableError) else (
+                f"budget of {budget_seconds}s exhausted"
+            )
+            logger.warning("cognee search failed (%s); serving the local mirror", detail)
             return await self._fallback.search(
                 merchant_id, query, limit=limit, hops=hops, kinds=kinds
             )
