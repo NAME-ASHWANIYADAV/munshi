@@ -227,13 +227,19 @@ class RecallParams(BaseModel):
 
 
 async def _recall(ctx: ToolContext, params: RecallParams) -> ToolResult:
+    wanted = tuple(params.kinds or FACT_KINDS)
     context = await ctx.providers.memory.search(
         ctx.merchant_id,
         params.query,
         limit=params.limit,
         hops=params.hops,
-        kinds=params.kinds or FACT_KINDS,
+        kinds=wanted,
     )
+    # The kind restriction governs the SEEDS; graph expansion then pulls in neighbours of any
+    # kind, and a conversation node one hop from a matched customer would walk right back into
+    # the answer — the exact recital FACT_KINDS exists to prevent. Filter the expanded set too.
+    allowed = set(wanted)
+    context.hits = [hit for hit in context.hits if hit.kind in allowed]
 
     # Raw node attributes are deliberately withheld from the payload the language layer sees.
     # They carry estimates and intermediate figures, and a composer that searches the payload for
